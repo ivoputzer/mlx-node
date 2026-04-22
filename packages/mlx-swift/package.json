@@ -1,0 +1,45 @@
+{
+  "name": "mlx-swift",
+  "description": "The foundational Node.js bridge to Apple's MLX framework via Swift. Native Apple Silicon acceleration with zero-dependency Node-API bindings.",
+  "version": "0.0.0",
+  "author": "Ivo von Putzer Reibegg <ivo.putzer@gmail.com> (https://github.com/ivoputzer)",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "default.metallib"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "keywords": [
+    "mlx",
+    "swift",
+    "apple-silicon",
+    "metal",
+    "node-api",
+    "native-bindings",
+    "macos-m1",
+    "macos-m2",
+    "macos-m3",
+    "macos-m4",
+    "macos-m5"
+  ],
+  "license": "WTFNMFPL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivoputzer/mlx-swift.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ivoputzer/mlx-swift/issues"
+  },
+  "homepage": "https://github.com/ivoputzer/mlx-swift#readme"
+}
