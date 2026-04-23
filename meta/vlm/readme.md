@@ -2,6 +2,7 @@
 
 Native Vision-Language Model (VLM) execution for Node.js on Apple Silicon.
 
+> [!WARNING]
 > **Merged Package:** This package is currently an alias of `mlx-lm`.
 
 To streamline the ecosystem, both text-based LLMs (Large Language Models) and VLMs (Vision-Language Models) are handled by a single unified package: `mlx-lm`.
