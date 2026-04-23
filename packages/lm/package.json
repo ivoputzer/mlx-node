@@ -1,0 +1,35 @@
+{
+  "name": "mlx-lm",
+  "version": "0.0.0",
+  "description": "Native Large Language Model execution for Node.js on Apple Silicon. Fast, memory-efficient text generation, chat sessions, and tool-calling using MLX and Swift.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "keywords": [
+    "mlx",
+    "llm",
+    "text-generation",
+    "mistral",
+    "llama",
+    "gpt",
+    "apple-silicon",
+    "metal",
+    "swift"
+  ],
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Ivo von Putzer Reibegg <ivo.putzer@gmail.com> (https://github.com/ivoputzer)",
+  "license": "WTFNMFPL",
+  "dependencies": {
+    "mlx-swift": "*"
+  }
+}
