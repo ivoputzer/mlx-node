@@ -1,11 +1,11 @@
 import { swift as native } from 'mlx-node'
 
-export async function load (path) {
-  return native.loadModel(path)
+export async function load (path, { loadModel } = native) {
+  return loadModel(path)
 }
 
-export function unload (modelId) {
-  return native.unloadModel(modelId)
+export function unload (modelId, { unloadModel } = native) {
+  return unloadModel(modelId)
 }
 
 /**
@@ -15,9 +15,9 @@ export function unload (modelId) {
  * @param {Object} [config] - e.g., { temperature: 0.7, topP: 0.9, maxTokens: 1000 }
  * @returns {Promise<string>}
  */
-export async function generate (modelId, prompt, config = {}) {
+export async function generate (modelId, prompt, config = {}, { generate } = native) {
   const configJson = JSON.stringify(config)
-  return native.generate(modelId, prompt, configJson)
+  return generate(modelId, prompt, configJson)
 }
 
 /**
@@ -27,7 +27,7 @@ export async function generate (modelId, prompt, config = {}) {
  * @param {Object} [config] - e.g., { temperature: 0.7, streamChunkSize: 5 }
  * @returns {AsyncGenerator<string, void, unknown>}
  */
-export async function * stream (modelId, prompt, config = {}) {
+export async function * stream (modelId, prompt, config = {}, { generateStream } = native) {
   const configJson = JSON.stringify(config)
 
   const queue = []
@@ -66,7 +66,7 @@ export async function * stream (modelId, prompt, config = {}) {
     }
   }
 
-  native.generateStream(modelId, prompt, configJson, streamCallback)
+  generateStream(modelId, prompt, configJson, streamCallback)
 
   while (true) {
     if (queue.length > 0) {
