@@ -19,6 +19,9 @@
   "files": [
     "index.js"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "author": "Ivo von Putzer Reibegg <ivo.putzer@gmail.com> (https://github.com/ivoputzer)",
   "license": "WTFNMFPL"
 }
