@@ -1,0 +1,24 @@
+{
+  "name": "",
+	"folders": [
+		{
+			"path": "."
+		}
+  ],
+  "settings": {
+   "js/ts.preferences.importModuleSpecifierEnding": "js",
+    "standard.enable": true,
+    "standard.enableGlobally": true,
+    "standard.run": "onType",
+    "standard.autoFixOnSave": true,
+    "standard.validate": [
+      "javascript",
+      "javascriptreact",
+      "typescript",
+      "typescriptreact"
+    ],
+    "standard.usePackageJson": true,
+    "standard.treatErrorsAsWarnings": false,
+    "standard.nodePath": "/Users/ivoputzer/.local/state/fnm_multishells/18971_1776910722347/bin/standard"
+  }
+}

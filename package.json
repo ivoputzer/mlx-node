@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "version": "0.0.0-private.0",
+  "workspaces": [
+    "bridges/*",
+    "packages/*",
+    "meta/*"
+  ],
+  "devDependencies": {
+    "standard": "^17.1.2"
+  }
+}

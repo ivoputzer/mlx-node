@@ -1,0 +1,12 @@
+{
+  "name": "mlx-agent",
+  "version": "0.0.0",
+  "description": "...",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "keywords": ["..."]
+}
