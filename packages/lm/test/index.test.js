@@ -104,7 +104,7 @@ describe('LLM Module', () => {
     it('should throw and halt if an error is emitted asynchronously', async () => {
       const mockGenerateStream = mock.fn((id, prompt, conf, cb) => {
         setTimeout(() => cb(null, 'chunk 1', false), 5)
-        setTimeout(() => cb('Native inference failure', null, false), 10)
+        setTimeout(() => cb('Native inference failure', null, false), 10) // eslint-disable-line n/no-callback-literal
       })
 
       const iterator = stream(42, 'error test', {}, { generateStream: mockGenerateStream })
@@ -123,7 +123,7 @@ describe('LLM Module', () => {
     it('should throw if an error is queued synchronously before consumption', async () => {
       const mockGenerateStream = mock.fn((id, prompt, conf, cb) => {
         cb(null, 'good chunk', false)
-        cb('Immediate queue failure', null, false)
+        cb('Immediate queue failure', null, false) // eslint-disable-line n/no-callback-literal
       })
 
       const iterator = stream(42, 'sync error test', {}, { generateStream: mockGenerateStream })
