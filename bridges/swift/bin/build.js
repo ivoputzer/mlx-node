@@ -22,7 +22,8 @@ const { values } = parseArgs({
 try {
   console.log(styleText(['bold', 'cyan'], '\n🚀 Starting MLX Bridge Build Pipeline...\n'))
 
-  const XCODE_DERIVED_DATA_PATH = join(SWIFT_DIR, '.build-xcode')
+  const XCODE_DERIVED_DATA_PATH = join(SWIFT_DIR, 'DerivedData')
+
 
   if (values.clean) {
     console.log(styleText('yellow', '🧹 Cleaning old caches...'))
@@ -36,7 +37,7 @@ try {
     // It doesn't bother zipping them up into a standalone .a static archive unless you explicitly create a full Xcode Project file which could be a future idea 🚀
     console.log(styleText(['bold', 'magenta'], '\n🍎 [XCode Override] Initiating the Metallib Heist...'))
 
-    await runCommand('xcodebuild', ['build', '-scheme', 'MLXBridge', '-destination', 'generic/platform=macOS', '-derivedDataPath', './.build-xcode', 'CONFIGURATION=Release'], SWIFT_DIR)
+    await runCommand('xcodebuild', ['build', '-scheme', 'MLXBridge', '-destination', 'generic/platform=macOS', '-derivedDataPath', './DerivedData', 'CONFIGURATION=Release'], SWIFT_DIR)
 
     console.log(styleText('yellow', '\n📦 Locating default.metallib...'))
     const metalLibPath = await findFile(XCODE_DERIVED_DATA_PATH, 'default.metallib')

@@ -1,16 +1,2 @@
-.DS_Store
-.build
-.xcode-build
-.swiftpm
-/.build
-/Packages
-xcuserdata/
-DerivedData/
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
-.netrc
-.build-xcode
-
-
 mlx.node
 default.metallib
