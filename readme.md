@@ -17,18 +17,37 @@ This monorepo is divided into two distinct layers to provide both maximum perfor
 - [x] Automatic `.metallib` shader discovery & binding.
 - [x] Synchronous Swift-to-V8 threading.
 - [ ] Dynamic C-string buffers for massive context windows (>32k).
-- [ ] Advanced generation configs (stop sequences, logit bias).
+- [ ] Advanced `GenerationConfig` (stop sequences, logit bias).
+- [ ] Robust Error Propagation with Swift stack traces.
+- [ ] Unified build pipeline for GitHub Actions.
+
 
 ### Phase 2: Usability
-- [ ] Implement `[{role: "user", content: "..."}]` Chat Templates.
+- [ ] Implement `[{role: "user", content: "..."}]` Chat Templates (OpenAI compatible?).
 - [ ] Provide Model Metadata (vocab size, context length).
 - [ ] Stream Backpressure handling for heavily loaded Node event loops.
-- [ ] GGUF format support.
+- [ ] GGUF format support in `mlx-lm` (NTH).
+- [ ] Configurable MLX Logging levels.
+- [ ] `AbortController` support for killing active inference.
 
 ### Phase 3: Developer Experience & Tooling
 - [ ] Full TypeScript definitions (`index.d.ts`).
 - [ ] CLI tools to download models directly from HuggingFace.
 - [ ] Progress callbacks for large model loading.
+
+<!--
+
+### Phase 3.5: Developer Tools
+- [ ] `mlx-server` - Cli to run an OpenAI-Like endpoint
+- [ ] `mlx-agent` - Agent parser (Agent = Model+Prompt+Tools+Loop -> Wrapper for an agent function definition)
+  - Pipeline
+  - Tool
+  - Queue
+  - Agent
+- [ ] `mlx-tool` - Tool parser (Tool = Wrapper/Parser for a function with definitions) <- To be honest this doesnt even make much sense and should be in
+- [ ] `mlx-mcp` - Tools that allows you to spin up mcp servers that can be passed to an Agent (directory access, git access, docker, etc)
+
+-->
 
 ### Phase 4: Ecosystem Expansion
 - [ ] `mlx-embed` - Text Embeddings API.
