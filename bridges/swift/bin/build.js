@@ -24,7 +24,6 @@ try {
 
   const XCODE_DERIVED_DATA_PATH = join(SWIFT_DIR, 'DerivedData')
 
-
   if (values.clean) {
     console.log(styleText('yellow', '🧹 Cleaning old caches...'))
 

@@ -1,6 +1,5 @@
 import { test, describe } from 'node:test'
 import { ok, fail, strictEqual } from 'node:assert/strict'
-import { rejects } from 'node:assert'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
