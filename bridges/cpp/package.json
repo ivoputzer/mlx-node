@@ -1,0 +1,26 @@
+{
+  "name": "mlx-cpp",
+  "description": "The foundational Node.js bridge to Apple's MLX framework via C++. Native Apple Silicon acceleration with zero-dependency Node-API bindings.",
+  "version": "0.0.0-draft.0",
+  "type": "module",
+  "exports": {
+    "require": "./mlx.node",
+    "import": "./index.js"
+  },
+  "files": [
+    "mlx.node",
+    "default.metallib"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "build": "node bin/build.js"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "os": [ "darwin" ],
+  "cpu": [ "arm64" ],
+  "keywords": [ "mlx", "swift", "apple-silicon", "metal", "node-api", "native-bindings", "macos-m1", "macos-m2", "macos-m3", "macos-m4", "macos-m5" ],
+  "author": "Ivo von Putzer Reibegg <ivo.putzer@gmail.com> (https://github.com/ivoputzer)",
+  "license": "WTFNMFPL"
+}
