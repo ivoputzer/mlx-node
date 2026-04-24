@@ -2,22 +2,45 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
-import Tokenizers
 
-// --- Configuration Parsing ---
+// --- 1. Expanded Configuration Parsing ---
 struct BridgeGenerateConfig: Decodable {
+    var maxTokens: Int?
+    var maxKVSize: Int?
+    var kvBits: Int?
+    var kvGroupSize: Int?
+    var quantizedKVStart: Int?
     var temperature: Float?
     var topP: Float?
+    var topK: Int?
+    var minP: Float?
     var repetitionPenalty: Float?
     var repetitionContextSize: Int?
-    var streamChunkSize: Int? // Used only in Swift for chunking
+    var presencePenalty: Float?
+    var presenceContextSize: Int?
+    var frequencyPenalty: Float?
+    var frequencyContextSize: Int?
+    var prefillStepSize: Int?
+    var streamChunkSize: Int?
 
     func toGenerateParameters() -> GenerateParameters {
         return GenerateParameters(
+            maxTokens: maxTokens,
+            maxKVSize: maxKVSize,
+            kvBits: kvBits,
+            kvGroupSize: kvGroupSize ?? 64,
+            quantizedKVStart: quantizedKVStart ?? 0,
             temperature: temperature ?? 0.6,
             topP: topP ?? 1.0,
-            repetitionPenalty: repetitionPenalty ?? 1.0,
-            repetitionContextSize: repetitionContextSize ?? 20
+            topK: topK ?? 0,
+            minP: minP ?? 0.0,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: repetitionContextSize ?? 20,
+            presencePenalty: presencePenalty,
+            presenceContextSize: presenceContextSize ?? 20,
+            frequencyPenalty: frequencyPenalty,
+            frequencyContextSize: frequencyContextSize ?? 20,
+            prefillStepSize: prefillStepSize ?? 512
         )
     }
 }
@@ -30,47 +53,37 @@ private func parseConfig(_ jsonString: String) -> BridgeGenerateConfig {
     return config
 }
 
-
-// --- Tokenizer Implementations ---
-struct BridgeTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
-    let tokenizer: Tokenizers.Tokenizer
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] { return tokenizer.encode(text: text) }
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { return tokenizer.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens) }
-    func convertTokenToId(_ token: String) -> Int? { return tokenizer.encode(text: token).first }
-    func convertIdToToken(_ id: Int) -> String? { return tokenizer.decode(tokens: [id]) }
-    var bosToken: String? { tokenizer.bosToken }
-    var eosToken: String? { tokenizer.eosToken }
-    var unknownToken: String? { tokenizer.unknownToken }
+// --- 2. The Null Tokenizer ---
+struct NullTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { return [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { return "" }
+    func convertTokenToId(_ token: String) -> Int? { return nil }
+    func convertIdToToken(_ id: Int) -> String? { return nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
     func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?, additionalContext: [String: any Sendable]?) throws -> [Int] { return [] }
 }
 
-struct BridgeTokenizerLoader: TokenizerLoader {
+struct NullTokenizerLoader: TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        let tokenizer = try await AutoTokenizer.from(modelFolder: directory)
-        return BridgeTokenizer(tokenizer: tokenizer)
+        return NullTokenizer()
     }
 }
 
-
-// --- Global Model Registry ---
+// --- Global Registries & Locks ---
 private var modelRegistry: [Int32: ModelContext] = [:]
+private var activeTasks: [Int32: Task<Void, Never>] = [:] // Track running generations
 private var nextModelId: Int32 = 1
 private let registryLock = NSLock()
 
 
-// --- Bridge Logic ---
+// --- 3. Bridge Logic ---
 
 @_cdecl("mlx_swift_init_metal")
 public func mlxSwiftInitMetal() {
-    // 1. Create a dummy scalar array
     let a = MLXArray(0.0)
-
-    // 2. Perform a math operation. This creates an MLX computation graph
-    // that requires the Metal 'add' kernel to execute.
     let b = a + a
-
-    // 3. Evaluate it. This forces MLX to compile the graph,
-    // hit the GPU, and permanently cache the default.metallib.
     eval(b)
 }
 
@@ -79,7 +92,7 @@ public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPoint
     let url = URL(fileURLWithPath: String(cString: path))
     Task {
         do {
-            let modelCtx = try await LLMModelFactory.shared.load(from: url, using: BridgeTokenizerLoader())
+            let modelCtx = try await LLMModelFactory.shared.load(from: url, using: NullTokenizerLoader())
             let id = registryLock.withLock {
                 let currentId = nextModelId
                 nextModelId += 1
@@ -95,126 +108,132 @@ public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPoint
 
 @_cdecl("mlx_swift_unload_model")
 public func unloadModel(modelId: Int32) -> Int32 {
+    cancelGenerate(modelId: modelId) // Ensure we stop processing before unloading
     let removed = registryLock.withLock { modelRegistry.removeValue(forKey: modelId) }
     return removed != nil ? 1 : 0
 }
 
-@_cdecl("mlx_swift_generate")
-public func generate(
-    modelId: Int32,
-    prompt: UnsafePointer<CChar>,
-    configJson: UnsafePointer<CChar>,
-    context: UnsafeMutableRawPointer,
-    callback: @convention(c) (UnsafeMutableRawPointer, Bool, UnsafePointer<CChar>?) -> Void
-) {
-    let promptStr = String(cString: prompt)
-    let configObj = parseConfig(String(cString: configJson))
-
-    Task {
-        let ctx = registryLock.withLock { modelRegistry[modelId] }
-
-        guard let modelCtx = ctx else {
-            "Error: Model ID not found".withCString { callback(context, false, $0) }
-            return
-        }
-
-        do {
-            let model = modelCtx.model
-            let tokenizer = modelCtx.tokenizer
-
-            // Encode the raw string using the loaded Tokenizer
-            let tokens = tokenizer.encode(text: promptStr)
-            let input = LMInput(tokens: MLXArray(tokens))
-            let parameters = configObj.toGenerateParameters()
-            let kvCache = model.newCache(parameters: parameters)
-            let iterator = try TokenIterator(input: input, model: model, cache: kvCache, parameters: parameters)
-
-            let (stream, _) = MLXLMCommon.generateTask(
-                promptTokenCount: tokens.count,
-                modelConfiguration: modelCtx.configuration,
-                tokenizer: tokenizer,
-                iterator: iterator
-            )
-
-            var fullOutput = ""
-            for await item in stream {
-                if let chunk = item.chunk { fullOutput += chunk }
-            }
-            fullOutput.withCString { callback(context, true, $0) }
-
-        } catch {
-            error.localizedDescription.withCString { callback(context, false, $0) }
-        }
+@_cdecl("mlx_swift_cancel_generate")
+public func cancelGenerate(modelId: Int32) {
+    registryLock.withLock {
+        activeTasks[modelId]?.cancel()
+        activeTasks.removeValue(forKey: modelId)
     }
 }
+
+// Updated Signature: (Context, TokenPointer, TokenCount, IsDone, IsError, StringPayload)
+// ... [Keep everything above generateStream exactly the same] ...
 
 @_cdecl("mlx_swift_generate_stream")
 public func generateStream(
     modelId: Int32,
-    prompt: UnsafePointer<CChar>,
+    promptTokens: UnsafePointer<Int32>,
+    promptLength: Int32,
     configJson: UnsafePointer<CChar>,
     context: UnsafeMutableRawPointer,
-    callback: @convention(c) (UnsafeMutableRawPointer, UnsafePointer<CChar>?, Bool, UnsafePointer<CChar>?) -> Void
+    callback: @convention(c) (UnsafeMutableRawPointer, UnsafePointer<Int32>?, Int32, Bool, Bool, UnsafePointer<CChar>?) -> Void
 ) {
-    let promptStr = String(cString: prompt)
+    let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
+    let tokens = Array(buffer).map { Int($0) }
+
     let configObj = parseConfig(String(cString: configJson))
-    let chunkSize = configObj.streamChunkSize ?? 4
+    let chunkSize = configObj.streamChunkSize ?? 5
 
-    Task {
-        let ctx = registryLock.withLock { modelRegistry[modelId] }
-
-        guard let modelCtx = ctx else {
-            "Error: Model ID not found".withCString { callback(context, nil, true, $0) }
+    let task = Task {
+        guard let modelCtx = registryLock.withLock({ modelRegistry[modelId] }) else {
+            "Error: Model ID not found".withCString { cStr in
+                callback(context, nil, 0, true, true, cStr)
+            }
             return
         }
 
         do {
-            let model = modelCtx.model
-            let tokenizer = modelCtx.tokenizer
-
-            let tokens = tokenizer.encode(text: promptStr)
             let input = LMInput(tokens: MLXArray(tokens))
             let parameters = configObj.toGenerateParameters()
-            let kvCache = model.newCache(parameters: parameters)
-            let iterator = try TokenIterator(input: input, model: model, cache: kvCache, parameters: parameters)
 
-            let (stream, _) = MLXLMCommon.generateTask(
-                promptTokenCount: tokens.count,
-                modelConfiguration: modelCtx.configuration,
-                tokenizer: tokenizer,
-                iterator: iterator
+            let (stream, _) = try MLXLMCommon.generateTokensTask(
+                input: input,
+                parameters: parameters,
+                context: modelCtx,
+                includeStopToken: true
             )
 
-            var chunkBuffer = ""
-            var tokenCount = 0
+            var tokenBuffer = [Int32]()
+            tokenBuffer.reserveCapacity(chunkSize)
 
-            for await item in stream {
-                if let chunk = item.chunk {
-                    chunkBuffer += chunk
-                    tokenCount += 1
+            var finalStats: GenerateCompletionInfo? = nil
+            var wasCancelled = false
 
-                    // Flush buffer when it hits chunk size
-                    if tokenCount >= chunkSize {
-                        chunkBuffer.withCString { cChunk in
-                            callback(context, cChunk, false, nil)
+            for await event in stream {
+                if Task.isCancelled {
+                    wasCancelled = true
+                    break
+                }
+
+                switch event {
+                case .token(let tokenId):
+                    tokenBuffer.append(Int32(tokenId))
+
+                    if tokenBuffer.count >= chunkSize {
+                        tokenBuffer.withUnsafeBufferPointer { ptr in
+                            callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
                         }
-                        chunkBuffer = ""
-                        tokenCount = 0
+                        tokenBuffer.removeAll(keepingCapacity: true)
                     }
+
+                case .info(let stats):
+                    finalStats = stats
                 }
             }
 
-            // Flush remaining text
-            if !chunkBuffer.isEmpty {
-                chunkBuffer.withCString { cChunk in
-                    callback(context, cChunk, false, nil)
+            // --- GUARANTEED TERMINAL BLOCK ---
+
+            // 1. Flush any remaining tokens
+            if !tokenBuffer.isEmpty {
+                tokenBuffer.withUnsafeBufferPointer { ptr in
+                    callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
                 }
             }
 
-            callback(context, nil, true, nil)
+            // 2. Fire EXACTLY ONE terminal callback
+            if wasCancelled {
+                "Generation Cancelled".withCString { cStr in
+                    callback(context, nil, 0, true, true, cStr)
+                }
+            } else if let stats = finalStats {
+                let statsDict: [String: Any] = [
+                    "promptTokens": stats.promptTokenCount,
+                    "generatedTokens": stats.generationTokenCount,
+                    "promptTime": stats.promptTime,
+                    "generateTime": stats.generateTime,
+                    "promptTokensPerSecond": stats.promptTokensPerSecond,
+                    "tokensPerSecond": stats.tokensPerSecond,
+                    "stopReason": String(describing: stats.stopReason)
+                ]
+
+                if let jsonData = try? JSONSerialization.data(withJSONObject: statsDict),
+                   let jsonStr = String(data: jsonData, encoding: .utf8) {
+                    jsonStr.withCString { cStr in
+                        callback(context, nil, 0, true, false, cStr)
+                    }
+                } else {
+                    callback(context, nil, 0, true, false, nil)
+                }
+            } else {
+                // Failsafe if stream ended with no stats
+                callback(context, nil, 0, true, false, nil)
+            }
+
+            // Cleanup
+            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
 
         } catch {
-            error.localizedDescription.withCString { callback(context, nil, true, $0) }
+            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
+            error.localizedDescription.withCString { cStr in
+                callback(context, nil, 0, true, true, cStr)
+            }
         }
     }
+
+    registryLock.withLock { activeTasks[modelId] = task }
 }

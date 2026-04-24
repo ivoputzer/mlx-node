@@ -8,63 +8,57 @@
 #include <dlfcn.h>
 #include <libgen.h>
 
-// Declare the Swift function
 extern void mlx_swift_init_metal(void);
+extern void mlx_swift_load_model(const char *path, void *context, void (*callback)(void *, bool, int32_t, const char *));
+extern int32_t mlx_swift_unload_model(int32_t model_id);
+extern void mlx_swift_cancel_generate(int32_t model_id);
+extern void mlx_swift_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
 
-typedef struct
-{
+// --- Structs ---
+typedef struct {
   napi_env env;
   napi_deferred deferred;
   napi_threadsafe_function tsfn;
 } PromiseContext;
 
-typedef struct
-{
+typedef struct {
   napi_env env;
   napi_threadsafe_function tsfn;
 } StreamContext;
 
-typedef struct
-{
+typedef struct {
   bool success;
   int32_t model_id;
   char *payload;
 } PromiseResult;
 
-typedef struct
-{
-  char *chunk;
+typedef struct {
+  int32_t *tokens;
+  int32_t count;
   bool is_done;
-  char *error_msg;
+  bool is_error;
+  char *payload;
 } StreamResult;
 
-typedef void (*LoadPromiseCallback)(void *context, bool success, int32_t model_id, const char *error_msg);
-typedef void (*GeneratePromiseCallback)(void *context, bool success, const char *payload);
-typedef void (*StreamCallback)(void *context, const char *chunk, bool is_done, const char *error_msg);
+// --- Cleanup Callbacks (Called by V8 Garbage Collector) ---
+static void FinalizePromiseContext(napi_env env, void* finalize_data, void* finalize_hint) {
+  free(finalize_data);
+}
 
-void mlx_swift_load_model(const char *path, void *context, LoadPromiseCallback callback);
-int32_t mlx_swift_unload_model(int32_t model_id);
-void mlx_swift_generate(int32_t model_id, const char *prompt, const char *config_json, void *context, GeneratePromiseCallback callback);
-void mlx_swift_generate_stream(int32_t model_id, const char *prompt, const char *config_json, void *context, StreamCallback callback);
+static void FinalizeStreamContext(napi_env env, void* finalize_data, void* finalize_hint) {
+  free(finalize_data);
+}
 
-// --- Callbacks (Omitted standard TSFN boilerplate for brevity, same as previous) ---
-static void CallJsPromise(napi_env env, napi_value js_cb, void *context, void *data)
-{
+// --- Load Callbacks ---
+static void CallJsPromise(napi_env env, napi_value js_cb, void *context, void *data) {
   PromiseContext *ctx = (PromiseContext *)context;
   PromiseResult *result = (PromiseResult *)data;
-  if (env != NULL)
-  {
-    if (result->success)
-    {
+  if (env != NULL) {
+    if (result->success) {
       napi_value js_result;
-      if (result->payload)
-        napi_create_string_utf8(env, result->payload, NAPI_AUTO_LENGTH, &js_result);
-      else
-        napi_create_int32(env, result->model_id, &js_result);
+      napi_create_int32(env, result->model_id, &js_result);
       napi_resolve_deferred(env, ctx->deferred, js_result);
-    }
-    else
-    {
+    } else {
       napi_value err_code, err_msg, error;
       napi_create_string_utf8(env, "MLX_ERR", NAPI_AUTO_LENGTH, &err_code);
       napi_create_string_utf8(env, result->payload ? result->payload : "Unknown error", NAPI_AUTO_LENGTH, &err_msg);
@@ -72,150 +66,147 @@ static void CallJsPromise(napi_env env, napi_value js_cb, void *context, void *d
       napi_reject_deferred(env, ctx->deferred, error);
     }
   }
-  if (result->payload)
-    free(result->payload);
+  if (result->payload) free(result->payload);
   free(result);
-  free(ctx);
 }
 
-static void SwiftLoadPromiseCallback(void *context, bool success, int32_t model_id, const char *error_msg)
-{
+static void SwiftLoadPromiseCallback(void *context, bool success, int32_t model_id, const char *error_msg) {
   PromiseContext *ctx = (PromiseContext *)context;
   PromiseResult *result = malloc(sizeof(PromiseResult));
   result->success = success;
   result->model_id = model_id;
   result->payload = error_msg ? strdup(error_msg) : NULL;
-  napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking);
-  napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
-}
 
-static void SwiftGeneratePromiseCallback(void *context, bool success, const char *payload)
-{
-  PromiseContext *ctx = (PromiseContext *)context;
-  PromiseResult *result = malloc(sizeof(PromiseResult));
-  result->success = success;
-  result->payload = payload ? strdup(payload) : NULL;
-  napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking);
-  napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
-}
-
-static void CallJsStream(napi_env env, napi_value js_cb, void *context, void *data)
-{
-  StreamContext *ctx = (StreamContext *)context;
-  StreamResult *result = (StreamResult *)data;
-  if (env != NULL && js_cb != NULL)
-  {
-    napi_value argv[3], global;
-    napi_get_global(env, &global);
-    if (result->error_msg)
-    {
-      napi_create_string_utf8(env, result->error_msg, NAPI_AUTO_LENGTH, &argv[0]);
-      napi_get_null(env, &argv[1]);
-      napi_get_boolean(env, true, &argv[2]);
-    }
-    else if (result->is_done)
-    {
-      napi_get_null(env, &argv[0]);
-      napi_get_null(env, &argv[1]);
-      napi_get_boolean(env, true, &argv[2]);
-    }
-    else
-    {
-      napi_get_null(env, &argv[0]);
-      napi_create_string_utf8(env, result->chunk ? result->chunk : "", NAPI_AUTO_LENGTH, &argv[1]);
-      napi_get_boolean(env, false, &argv[2]);
-    }
-    napi_call_function(env, global, js_cb, 3, argv, NULL);
+  if (napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking) != napi_ok) {
+    if (result->payload) free(result->payload);
+    free(result);
   }
-  if (result->chunk)
-    free(result->chunk);
-  if (result->error_msg)
-    free(result->error_msg);
-  free(result);
-  if (data && (((StreamResult *)data)->is_done || ((StreamResult *)data)->error_msg))
-    free(ctx);
+  napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
 }
 
-static void SwiftStreamCallback(void *context, const char *chunk, bool is_done, const char *error_msg)
-{
+// --- Stream Callbacks ---
+static void CallJsStream(napi_env env, napi_value js_cb, void *context, void *data) {
+  StreamResult *result = (StreamResult *)data;
+
+  if (env != NULL && js_cb != NULL) {
+    napi_value argv[4], global;
+    napi_get_global(env, &global);
+
+    if (result->is_error) {
+      napi_value err_code, err_msg;
+      napi_create_string_utf8(env, "MLX_ERR", NAPI_AUTO_LENGTH, &err_code);
+      napi_create_string_utf8(env, result->payload ? result->payload : "Unknown error", NAPI_AUTO_LENGTH, &err_msg);
+      napi_create_error(env, err_code, err_msg, &argv[0]);
+      napi_get_null(env, &argv[1]);
+      napi_get_boolean(env, true, &argv[2]);
+      napi_get_null(env, &argv[3]);
+    } else {
+      napi_get_null(env, &argv[0]);
+
+      if (result->count > 0 && result->tokens != NULL) {
+        void* array_data;
+        napi_value arraybuffer;
+        napi_create_arraybuffer(env, result->count * sizeof(int32_t), &array_data, &arraybuffer);
+        memcpy(array_data, result->tokens, result->count * sizeof(int32_t));
+        napi_create_typedarray(env, napi_int32_array, result->count, arraybuffer, 0, &argv[1]);
+      } else {
+        napi_get_null(env, &argv[1]);
+      }
+
+      napi_get_boolean(env, result->is_done, &argv[2]);
+
+      if (result->payload != NULL) {
+        napi_create_string_utf8(env, result->payload, NAPI_AUTO_LENGTH, &argv[3]);
+      } else {
+        napi_get_null(env, &argv[3]);
+      }
+    }
+    napi_call_function(env, global, js_cb, 4, argv, NULL);
+  }
+
+  // Free data memory
+  if (result->tokens) free(result->tokens);
+  if (result->payload) free(result->payload);
+  free(result);
+}
+
+static void SwiftStreamCallback(void *context, const int32_t *tokens, int32_t count, bool is_done, bool is_error, const char *payload) {
   StreamContext *ctx = (StreamContext *)context;
   StreamResult *result = malloc(sizeof(StreamResult));
-  result->chunk = chunk ? strdup(chunk) : NULL;
+
+  result->count = count;
   result->is_done = is_done;
-  result->error_msg = error_msg ? strdup(error_msg) : NULL;
-  napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking);
-  if (is_done || error_msg != NULL)
+  result->is_error = is_error;
+  result->payload = payload ? strdup(payload) : NULL;
+
+  if (count > 0 && tokens != NULL) {
+    result->tokens = malloc(count * sizeof(int32_t));
+    memcpy(result->tokens, tokens, count * sizeof(int32_t));
+  } else {
+    result->tokens = NULL;
+  }
+
+  // CRITICAL FIX: If queue is closed (e.g. JS aborted abruptly), free memory immediately!
+  if (napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking) != napi_ok) {
+    if (result->tokens) free(result->tokens);
+    if (result->payload) free(result->payload);
+    free(result);
+  }
+
+  if (is_done) {
     napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
+  }
 }
 
 // --- API EXPORTS ---
-napi_value LoadModel(napi_env env, napi_callback_info info)
-{
+napi_value LoadModel(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 
   char path[1024];
-  size_t result;
-  napi_get_value_string_utf8(env, args[0], path, sizeof(path), &result);
+  size_t result_len;
+  napi_get_value_string_utf8(env, args[0], path, sizeof(path), &result_len);
 
   PromiseContext *ctx = malloc(sizeof(PromiseContext));
   ctx->env = env;
-  napi_value promise;
+  napi_value promise, resource_name;
   napi_create_promise(env, &ctx->deferred, &promise);
-  napi_value resource_name;
-  napi_create_string_utf8(env, "MLXLoadModel", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, NULL, NULL, ctx, CallJsPromise, &ctx->tsfn);
+  napi_create_string_utf8(env, "MLXLoad", NAPI_AUTO_LENGTH, &resource_name);
+
+  // Notice the FinalizePromiseContext callback here!
+  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, NULL, FinalizePromiseContext, ctx, CallJsPromise, &ctx->tsfn);
 
   mlx_swift_load_model(path, ctx, SwiftLoadPromiseCallback);
   return promise;
 }
 
-napi_value UnloadModel(napi_env env, napi_callback_info info)
-{
+// UnloadModel & CancelGenerate identical to last iteration...
+napi_value UnloadModel(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-
   int32_t model_id;
   napi_get_value_int32(env, args[0], &model_id);
   int32_t success = mlx_swift_unload_model(model_id);
-
   napi_value js_result;
   napi_get_boolean(env, success == 1, &js_result);
   return js_result;
 }
 
-napi_value Generate(napi_env env, napi_callback_info info)
-{
-  size_t argc = 3;
-  napi_value args[3];
+napi_value CancelGenerate(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-
   int32_t model_id;
   napi_get_value_int32(env, args[0], &model_id);
-
-  char prompt[32768];
-  size_t result;
-  napi_get_value_string_utf8(env, args[1], prompt, sizeof(prompt), &result);
-
-  char config_json[4096];
-  napi_get_value_string_utf8(env, args[2], config_json, sizeof(config_json), &result);
-
-  PromiseContext *ctx = malloc(sizeof(PromiseContext));
-  ctx->env = env;
-  napi_value promise;
-  napi_create_promise(env, &ctx->deferred, &promise);
-  napi_value resource_name;
-  napi_create_string_utf8(env, "MLXGenerate", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, NULL, NULL, ctx, CallJsPromise, &ctx->tsfn);
-
-  mlx_swift_generate(model_id, prompt, config_json, ctx, SwiftGeneratePromiseCallback);
-  return promise;
+  mlx_swift_cancel_generate(model_id);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
 }
 
-napi_value GenerateStream(napi_env env, napi_callback_info info)
-{
+napi_value GenerateStream(napi_env env, napi_callback_info info) {
   size_t argc = 4;
   napi_value args[4];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
@@ -223,12 +214,19 @@ napi_value GenerateStream(napi_env env, napi_callback_info info)
   int32_t model_id;
   napi_get_value_int32(env, args[0], &model_id);
 
-  char prompt[32768];
-  size_t result;
-  napi_get_value_string_utf8(env, args[1], prompt, sizeof(prompt), &result);
+  napi_typedarray_type type;
+  size_t length;
+  void* data;
+  napi_value arraybuffer;
+  size_t byte_offset;
+  napi_get_typedarray_info(env, args[1], &type, &length, &data, &arraybuffer, &byte_offset);
+
+  int32_t* prompt_tokens = (int32_t*)((char*)data + byte_offset);
+  int32_t prompt_length = (int32_t)length;
 
   char config_json[4096];
-  napi_get_value_string_utf8(env, args[2], config_json, sizeof(config_json), &result);
+  size_t result_len;
+  napi_get_value_string_utf8(env, args[2], config_json, sizeof(config_json), &result_len);
 
   napi_value js_callback = args[3];
 
@@ -236,44 +234,38 @@ napi_value GenerateStream(napi_env env, napi_callback_info info)
   ctx->env = env;
   napi_value resource_name;
   napi_create_string_utf8(env, "MLXStream", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, NULL, ctx, CallJsStream, &ctx->tsfn);
 
-  mlx_swift_generate_stream(model_id, prompt, config_json, ctx, SwiftStreamCallback);
+  // Notice the FinalizeStreamContext callback here!
+  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, FinalizeStreamContext, ctx, CallJsStream, &ctx->tsfn);
+
+  mlx_swift_generate_stream(model_id, prompt_tokens, prompt_length, config_json, ctx, SwiftStreamCallback);
+
   napi_value undefined;
   napi_get_undefined(env, &undefined);
   return undefined;
 }
 
-napi_value init(napi_env env, napi_value exports)
-{
-  // --- SYNCHRONOUS CWD HOOK ---
+napi_value init(napi_env env, napi_value exports) {
+  // [CWD Metal init hook from before...]
   char old_cwd[1024];
   if (getcwd(old_cwd, sizeof(old_cwd)) != NULL) {
     Dl_info info;
-    // dladdr gives us the absolute path to this mlx_swift.node binary
     if (dladdr((void*)init, &info)) {
       char *path_copy = strdup(info.dli_fname);
-
-      // 1. Jump to the package directory where default.metallib lives
       chdir(dirname(path_copy));
-
-      // 2. Force MLX to boot up. It uses CWD fallback, finds the file, and caches it.
       mlx_swift_init_metal();
-
-      // 3. Jump immediately back to the user's project CWD
       chdir(old_cwd);
       free(path_copy);
     }
   }
-  // --- END HOOK ---
 
   napi_property_descriptor desc[] = {
       {"loadModel", NULL, LoadModel, NULL, NULL, NULL, napi_default, NULL},
       {"unloadModel", NULL, UnloadModel, NULL, NULL, NULL, napi_default, NULL},
-      {"generate", NULL, Generate, NULL, NULL, NULL, napi_default, NULL},
-      {"generateStream", NULL, GenerateStream, NULL, NULL, NULL, napi_default, NULL}};
+      {"cancelGenerate", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL},
+      {"generateStream", NULL, GenerateStream, NULL, NULL, NULL, napi_default, NULL}
+  };
   napi_define_properties(env, exports, 4, desc);
   return exports;
 }
-
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)

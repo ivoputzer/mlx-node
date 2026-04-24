@@ -16,8 +16,7 @@ let package = Package(
             name: "MLXBridge",
             dependencies: [
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
-                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
             ],
             path: "Sources"
         )
