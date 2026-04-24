@@ -9,7 +9,7 @@ set -e
 LIB_NAME="MLXBridge" # FIXME: This needs to be renamed to MLXBridge at some point 😂
 
 echo "🧹 Cleaning old caches..."
-rm -rf .build DerivedData
+# rm -rf .build DerivedData
 
 # So swift build gives you the .a but no metal. xcodebuild gives you the metal but no .a 🙈 🔫
 echo "🔨 Building Swift Core..."
@@ -23,24 +23,26 @@ if [ -z "$LIB_PATH" ]; then
   exit 1
 fi
 
-# Why did Xcode give you the .metallib but no .a?
-# Because when Xcode reads a Package.swift, it compiles the .o (object) files and links them directly into its internal cache.
-# It doesn't bother zipping them up into a standalone .a static archive unless you explicitly create a full Xcode Project file 🚀
-echo "🔨 Building XCodeBuild (forces bundle for default.metallib)..."
-xcodebuild build -scheme $LIB_NAME -destination 'generic/platform=macOS' -derivedDataPath ./DerivedData CONFIGURATION=Release
-
 NODE_INCLUDE=$(node -pe "path.join(process.execPath, '..', '..', 'include', 'node')")
 
 echo "🔗 Linking Node-API Bridge (Forced Static)..."
 clang -O3 -shared -I"$NODE_INCLUDE" binding.c "$LIB_PATH" -o ../mlx.node -undefined dynamic_lookup -L/usr/lib/swift -mmacosx-version-min=14.0
 
-echo "📦 Extracting default.metallib from Xcode Bundle..."
-METALLIB_PATH=$(find ./DerivedData -name "default.metallib" | head -n 1)
 
-if [ -n "$METALLIB_PATH" ]; then
-  cp "$METALLIB_PATH" ../default.metallib
-  echo "✅ default.metallib extracted successfully!"
-else
-  echo "❌ Error: default.metallib not found!"
-  exit 1
-fi
+# Why did Xcode give you the .metallib but no .a?
+# Because when Xcode reads a Package.swift, it compiles the .o (object) files and links them directly into its internal cache.
+# It doesn't bother zipping them up into a standalone .a static archive unless you explicitly create a full Xcode Project file 🚀
+
+# echo "🔨 Building XCodeBuild (forces bundle for default.metallib)..."
+# xcodebuild build -scheme $LIB_NAME -destination 'generic/platform=macOS' -derivedDataPath ./DerivedData CONFIGURATION=Release
+
+# echo "📦 Extracting default.metallib from Xcode Bundle..."
+# METALLIB_PATH=$(find ./DerivedData -name "default.metallib" | head -n 1)
+
+# if [ -n "$METALLIB_PATH" ]; then
+#   cp "$METALLIB_PATH" ../default.metallib
+#   echo "✅ default.metallib extracted successfully!"
+# else
+#   echo "❌ Error: default.metallib not found!"
+#   exit 1
+# fi
