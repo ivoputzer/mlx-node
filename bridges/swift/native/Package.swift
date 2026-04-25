@@ -18,7 +18,11 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm")
             ],
-            path: "Sources"
-        )
+            path: "Sources",
+        ),
+        .testTarget(
+            name: "MLXBridgeTests",
+            dependencies: ["MLXBridge"]
+        ),
     ]
 )
