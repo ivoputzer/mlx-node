@@ -14,6 +14,9 @@ extern int32_t mlx_swift_unload_model(int32_t model_id);
 extern void mlx_swift_cancel_generate(int32_t model_id);
 extern void mlx_swift_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
 
+// Methods following the new bridge_ extern convention
+extern char* bridge_metrics(void);
+
 // --- Structs ---
 typedef struct {
   napi_env env;
@@ -156,6 +159,21 @@ static void SwiftStreamCallback(void *context, const int32_t *tokens, int32_t co
   if (is_done) {
     napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
   }
+}
+
+// Metrics Binding (Synchronous)
+napi_value Metrics(napi_env env, napi_callback_info info) {
+  char *json_str = bridge_metrics();
+  napi_value result;
+
+  if (json_str == NULL) {
+    napi_create_string_utf8(env, "{}", NAPI_AUTO_LENGTH, &result);
+  } else {
+    napi_create_string_utf8(env, json_str, NAPI_AUTO_LENGTH, &result);
+    free(json_str); // Prevent memory leak!
+  }
+
+  return result;
 }
 
 // --- API EXPORTS ---
