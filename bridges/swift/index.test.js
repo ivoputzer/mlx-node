@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 
-import mlx, { loadModel, unloadModel, generateStream } from '../index.js'
+import mlx, { load as loadModel, unload as unloadModel, stream as generateStream, generate } from 'mlx-swift'
 
 describe('mlx-node (native bridge)', () => {
   it('Supports both require and import', () => {
@@ -20,7 +20,7 @@ describe('mlx-node (native bridge)', () => {
   })
 
   it('Has default.metallib bundled and locatable', () => {
-    const metallibPath = join(import.meta.dirname, '..', 'default.metallib')
+    const metallibPath = join(import.meta.dirname, 'default.metallib')
     ok(existsSync(metallibPath), 'default.metallib must exist next to the binary')
   })
 
