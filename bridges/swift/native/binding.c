@@ -284,7 +284,8 @@ napi_value init(napi_env env, napi_value exports) {
       {"load", NULL, LoadModel, NULL, NULL, NULL, napi_default, NULL},
       {"unload", NULL, UnloadModel, NULL, NULL, NULL, napi_default, NULL},
       {"stream", NULL, GenerateStream, NULL, NULL, NULL, napi_default, NULL},
-      {"abort", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL}
+      {"abort", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL},
+      {"metrics", NULL, Metrics, NULL, NULL, NULL, napi_default, NULL}
   };
   napi_define_properties(env, exports, 4, desc);
   return exports;

@@ -9,6 +9,14 @@ export const load = mlx.load
 export const unload = mlx.unload
 export const abort = mlx.abort
 
+export function metrics ({ metrics } = mlx) {
+  try {
+    return JSON.parse(metrics())
+  } catch (_) {
+    return {}
+  }
+}
+
 export const generate = async (modelId, promptTokens, config, { stream } = mlx) => {
   const streamChunkSize = 2147483647 // int32_t
   return new Promise((resolve, reject) => {
