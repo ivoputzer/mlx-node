@@ -1,4 +1,5 @@
-# mlx-swift
+mlx-swift
+---
 
 The foundational Node.js bridge to Apple's MLX framework via Swift.
 
@@ -7,4 +8,4 @@ This package contains the pre-compiled C/Swift binaries and Metal GPU shaders re
 ## How it works
 This package statically links Apple's `mlx-swift` libraries into a highly optimized Node-API C bridge. It manages memory safety across the Swift/V8 boundary and handles multi-threaded inference streams safely within the Node.js event loop.
 
-*Internal package. Do not consume directly. Use `mlx-lm`.*
+*Internal package. Do not consume directly. Use [mlx-lm](https://www.npmjs.com/package/mlx-lm) instead.*
