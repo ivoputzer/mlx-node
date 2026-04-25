@@ -16,22 +16,22 @@ This monorepo is divided into two distinct layers to provide both maximum perfor
 - [x] Zero-dependency pre-compiled N-API binaries.
 - [x] Automatic `.metallib` shader discovery & binding.
 - [x] Synchronous Swift-to-V8 threading.
-- [ ] Dynamic C-string buffers for massive context windows (>32k).
-- [ ] Advanced `GenerationConfig` (stop sequences, logit bias).
-- [ ] Robust Error Propagation with Swift stack traces.
+- [x] ~Dynamic C-string buffers for massive context windows (>32k).~ int32array
+- [x] Advanced `GenerationConfig` (stop sequences, logit bias).
+- [x] Robust Error Propagation with Swift stack traces.
 - [ ] Unified build pipeline for GitHub Actions.
 
 
 ### Phase 2: Usability
-- [ ] Implement `[{role: "user", content: "..."}]` Chat Templates (OpenAI compatible?).
+- [x] Implement `[{role: "user", content: "..."}]` Chat Templates (OpenAI compatible?).
 - [ ] Provide Model Metadata (vocab size, context length).
-- [ ] Stream Backpressure handling for heavily loaded Node event loops.
+- [x] Stream Backpressure handling for heavily loaded Node event loops.
 - [ ] GGUF format support in `mlx-lm` (NTH).
 - [ ] Configurable MLX Logging levels.
-- [ ] `AbortController` support for killing active inference.
+- [x] `AbortController` support for killing active inference.
 
 ### Phase 3: Developer Experience & Tooling
-- [ ] Full TypeScript definitions (`index.d.ts`).
+- [ ] TypeScript definitions (`index.d.ts`) or jsdoc.
 - [ ] CLI tools to download models directly from HuggingFace.
 - [ ] Progress callbacks for large model loading.
 
