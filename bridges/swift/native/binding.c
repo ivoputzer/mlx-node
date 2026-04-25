@@ -224,9 +224,11 @@ napi_value GenerateStream(napi_env env, napi_callback_info info) {
   int32_t* prompt_tokens = (int32_t*)((char*)data + byte_offset);
   int32_t prompt_length = (int32_t)length;
 
-  char config_json[4096];
-  size_t result_len;
-  napi_get_value_string_utf8(env, args[2], config_json, sizeof(config_json), &result_len);
+  // DYNAMICALLY ALLOCATE CONFIG_JSON TO SUPPORT ANY LENGTH
+  size_t str_len;
+  napi_get_value_string_utf8(env, args[2], NULL, 0, &str_len); // pass NULL first to get the exact length of the JSON string
+  char* config_json = (char*)malloc(str_len + 1); // malloc the exact size + 1 (for the \0 null terminator)
+  napi_get_value_string_utf8(env, args[2], config_json, str_len + 1, &str_len);
 
   napi_value js_callback = args[3];
 
@@ -235,10 +237,11 @@ napi_value GenerateStream(napi_env env, napi_callback_info info) {
   napi_value resource_name;
   napi_create_string_utf8(env, "MLXStream", NAPI_AUTO_LENGTH, &resource_name);
 
-  // Notice the FinalizeStreamContext callback here!
   napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, FinalizeStreamContext, ctx, CallJsStream, &ctx->tsfn);
 
   mlx_swift_generate_stream(model_id, prompt_tokens, prompt_length, config_json, ctx, SwiftStreamCallback);
+
+  free(config_json); // Swift has already copied it synchronously via String(cString:)
 
   napi_value undefined;
   napi_get_undefined(env, &undefined);
