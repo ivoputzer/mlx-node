@@ -8,6 +8,7 @@
     "import": "./index.js"
   },
   "files": [
+    "index.js",
     "mlx.node",
     "default.metallib"
   ],
