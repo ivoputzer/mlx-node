@@ -281,10 +281,10 @@ napi_value init(napi_env env, napi_value exports) {
   }
 
   napi_property_descriptor desc[] = {
-      {"loadModel", NULL, LoadModel, NULL, NULL, NULL, napi_default, NULL},
-      {"unloadModel", NULL, UnloadModel, NULL, NULL, NULL, napi_default, NULL},
-      {"cancelGenerate", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL},
-      {"generateStream", NULL, GenerateStream, NULL, NULL, NULL, napi_default, NULL}
+      {"load", NULL, LoadModel, NULL, NULL, NULL, napi_default, NULL},
+      {"unload", NULL, UnloadModel, NULL, NULL, NULL, napi_default, NULL},
+      {"stream", NULL, GenerateStream, NULL, NULL, NULL, napi_default, NULL},
+      {"abort", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL}
   };
   napi_define_properties(env, exports, 4, desc);
   return exports;

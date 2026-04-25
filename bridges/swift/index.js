@@ -1,36 +1,58 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const native = require('mlx-swift')
+const mlx = require('mlx-swift') // package.json|exports.require=./mlx.node
 
-export const loadModel = native.loadModel // fixme: load
-export const unloadModel = native.unloadModel // fixme: unload|dispose
+// API
 
-// export const generateStream = native.generateStream // fixme: stream|generate
-export const cancelGenerate = native.cancelGenerate // fixme: cancel|abort
+export const load = mlx.load
+export const unload = mlx.unload
+export const abort = mlx.abort
 
-export async function * generateStream (modelId, promptTokens, configJson, { generateStream } = native) {
+export const generate = async (modelId, promptTokens, config, { stream } = mlx) => {
+  const streamChunkSize = 2147483647 // int32_t
+  return new Promise((resolve, reject) => {
+    stream(modelId, promptTokens, JSON.stringify({ ...config, streamChunkSize }), (error, tokens, done, stats) => {
+      if (error) {
+        return reject(error)
+      } else if (done) {
+        try {
+          resolve({ tokens, stats: JSON.parse(stats) })
+        } catch (_) {
+          resolve({ tokens })
+        }
+      }
+    })
+  })
+}
+
+export async function * stream (modelId, prompt, configJson, { stream } = mlx) {
   const queue = []
   let resolveNext = null
   let rejectNext = null
   let isFinished = false
 
-  const callback = (cause, chunkInt32Array, isDone, payloadStr) => {
+  // const configJson = JSON.stringify(
+  //   Object.fromEntries(
+  //     Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
+  //   )
+  // )
+
+  // config should be converted into JSON inside here
+  stream(modelId, prompt, configJson, (cause, tokens, done, json) => {
     if (cause) {
       const error = new Error(cause.message, { cause })
       if (resolveNext) { rejectNext(error); resolveNext = null; rejectNext = null } else queue.push({ err: error })
       isFinished = true
-    } else if (isDone) {
+    } else if (done) {
       let stats = null
-      if (payloadStr) try { stats = JSON.parse(payloadStr) } catch (e) {}
+      if (json) try { stats = JSON.parse(json) } catch (e) {}
       if (resolveNext) { resolveNext({ done: true, stats }); resolveNext = null; rejectNext = null } else queue.push({ done: true, stats })
       isFinished = true
-    } else if (chunkInt32Array) {
-      if (resolveNext) { resolveNext({ tokens: chunkInt32Array }); resolveNext = null; rejectNext = null } else queue.push({ tokens: chunkInt32Array })
+    } else if (tokens) {
+      if (resolveNext) { resolveNext({ tokens }); resolveNext = null; rejectNext = null } else queue.push({ tokens })
     }
-  }
-
-  generateStream(modelId, promptTokens, configJson, callback)
+  })
 
   while (true) {
     let item
@@ -51,4 +73,4 @@ export async function * generateStream (modelId, promptTokens, configJson, { gen
   }
 }
 
-export default native
+export default mlx
