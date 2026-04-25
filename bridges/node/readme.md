@@ -1,4 +1,5 @@
-# mlx-node
+mlx-node
+---
 
 The primary Native Bridge aggregator for Apple's MLX framework on Node.js.
 
