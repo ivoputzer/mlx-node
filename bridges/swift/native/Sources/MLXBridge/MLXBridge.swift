@@ -121,8 +121,19 @@ public func cancelGenerate(modelId: Int32) {
     }
 }
 
-// Updated Signature: (Context, TokenPointer, TokenCount, IsDone, IsError, StringPayload)
-// ... [Keep everything above generateStream exactly the same] ...
+// Metrics (Synchronous)
+@_cdecl("bridge_metrics")
+public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
+
+    let snapshot = Memory.snapshot() // returns a Codable struct containing activeMemory, peakMemory, and cacheMemory
+
+    guard let jsonData = try? JSONEncoder().encode(snapshot),
+          let jsonStr = String(data: jsonData, encoding: .utf8) else {
+        return nil
+    }
+
+    return strdup(jsonStr)
+}
 
 @_cdecl("mlx_swift_generate_stream")
 public func generateStream(
