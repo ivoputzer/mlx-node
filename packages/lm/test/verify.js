@@ -1,45 +1,41 @@
-import { load } from 'mlx-lm'
+// import * as mlx from 'mlx-node/swift'
+import { load /*, createLoad */ } from 'mlx-lm'
 
-const controller = new AbortController()
+// const load = createLoad(mlx)
 
 console.time('model loaded')
-const model = await load('/Users/ivoputzer/github/models/gemma-4-e2b')
+// const model = await load('/Users/ivoputzer/github/models/Jackrong/Qwopus3.5-4B-v3')
+const model = await load('/Users/ivoputzer/github/models/Jackrong/MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-8bit')
 console.timeEnd('model loaded')
 
-const messages = [{
-  role: 'system',
-  content: 'You are a helpful assistant'
-}, {
-  role: 'user',
-  content: 'Tell me something about italy'
-}]
+const controller = new AbortController()
+const messages = [{ role: 'system', content: 'You are a helpful assistant' }, { role: 'user', content: 'Tell me an interesting fact about Node.js' }]
 
-// const prompt = new Template(chatTemplate).render({
-//   messages
-//   /*
-//   bos_token: configJson.bos_token,
-//   eos_token: configJson.eos_token
-//   add_generation_prompt: true
-//   tools
-//   */
-// })
-// const { ids, tokens, attention_mask } = tokenizer.encode(prompt)
+console.log('------------------- GENERATE -------------------')
 
-// console.log({ ids, tokens, attention_mask })
+console.time('generate time')
+const response = await model.generate(messages, { signal: controller.signal, streamChunkSize: 1 })
+console.timeEnd('generate time')
 
-// new Int32Array(ids)
+console.dir(response)
+
+console.log('-------------------- STREAM --------------------')
 
 setTimeout(() => {
-  console.log('---- aborting')
+  console.log('---- aborting (10s)')
   controller.abort()
-}, 10000)
+}, 5000)
 
-for await (const { text, done, ...rest } of model.stream(messages, { signal: controller.signal, streamChunkSize: 1 })) {
+console.time('stream time')
+for await (const { text, done, ...rest } of model.stream(messages, { signal: controller.signal, streamChunkSize: 5 })) {
   if (done) {
     console.log(rest)
   } else {
     process.stdout.write(text)
   }
 }
-
+console.timeEnd('stream time')
 model.unload()
+console.log('---- unload')
+
+process.stdin.resume() // this is required to prevent gc from interfering with the test
