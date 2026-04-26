@@ -80,14 +80,13 @@ private let registryLock = NSLock()
 
 // --- 3. Bridge Logic ---
 
-@_cdecl("mlx_swift_init_metal")
-public func mlxSwiftInitMetal() {
+@_cdecl("bridge_metal_load")
+public func loadMetal() {
     let a = MLXArray(0.0)
-    let b = a + a
-    eval(b)
+    eval(a + a)
 }
 
-@_cdecl("mlx_swift_load_model")
+@_cdecl("bridge_model_load")
 public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPointer, callback: @convention(c) (UnsafeMutableRawPointer, Bool, Int32, UnsafePointer<CChar>?) -> Void) {
     let url = URL(fileURLWithPath: String(cString: path))
     Task {
@@ -106,14 +105,14 @@ public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPoint
     }
 }
 
-@_cdecl("mlx_swift_unload_model")
+@_cdecl("bridge_model_unload")
 public func unloadModel(modelId: Int32) -> Int32 {
     cancelGenerate(modelId: modelId) // Ensure we stop processing before unloading
     let removed = registryLock.withLock { modelRegistry.removeValue(forKey: modelId) }
     return removed != nil ? 1 : 0
 }
 
-@_cdecl("mlx_swift_cancel_generate")
+@_cdecl("bridge_generate_abort")
 public func cancelGenerate(modelId: Int32) {
     registryLock.withLock {
         activeTasks[modelId]?.cancel()
@@ -135,7 +134,7 @@ public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
     return strdup(jsonStr)
 }
 
-@_cdecl("mlx_swift_generate_stream")
+@_cdecl("bridge_generate_stream")
 public func generateStream(
     modelId: Int32,
     promptTokens: UnsafePointer<Int32>,

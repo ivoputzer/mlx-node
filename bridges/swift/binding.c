@@ -9,11 +9,12 @@
 #include <libgen.h>
 
 // --- Swift Bridge Externs ---
-extern void mlx_swift_init_metal(void);
-extern void mlx_swift_load_model(const char *path, void *context, void (*callback)(void *, bool, int32_t, const char *));
-extern int32_t mlx_swift_unload_model(int32_t model_id);
-extern void mlx_swift_cancel_generate(int32_t model_id);
-extern void mlx_swift_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
+
+extern void bridge_metal_load(void);
+extern void bridge_model_load(const char *path, void *context, void (*callback)(void *, bool, int32_t, const char *));
+extern int32_t bridge_model_unload(int32_t model_id);
+extern void bridge_generate_abort(int32_t model_id);
+extern void bridge_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
 extern char* bridge_metrics(void);
 
 
@@ -208,7 +209,7 @@ napi_value Export_LoadModel(napi_env env, napi_callback_info info) {
 
   napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, load_ctx, FinalizeModelLoadContext, load_ctx, ResolveModelLoadOnMainThread, &load_ctx->threadsafe_fn);
 
-  mlx_swift_load_model(path_string, load_ctx, OnModelLoadCompleted);
+  bridge_model_load(path_string, load_ctx, OnModelLoadCompleted);
 
   free(path_string); // Swift copies this synchronously, safe to free immediately
   return promise;
@@ -222,7 +223,7 @@ napi_value Export_UnloadModel(napi_env env, napi_callback_info info) {
   int32_t model_id;
   napi_get_value_int32(env, args[0], &model_id);
 
-  int32_t success_flag = mlx_swift_unload_model(model_id);
+  int32_t success_flag = bridge_model_unload(model_id);
 
   napi_value js_result;
   napi_get_boolean(env, success_flag == 1, &js_result);
@@ -237,7 +238,7 @@ napi_value Export_AbortGeneration(napi_env env, napi_callback_info info) {
   int32_t model_id;
   napi_get_value_int32(env, args[0], &model_id);
 
-  mlx_swift_cancel_generate(model_id);
+  bridge_generate_abort(model_id);
 
   napi_value undefined;
   napi_get_undefined(env, &undefined);
@@ -278,7 +279,7 @@ napi_value Export_GenerateStream(napi_env env, napi_callback_info info) {
 
   napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, stream_ctx, FinalizeGenerationStreamContext, stream_ctx, EmitStreamEventOnMainThread, &stream_ctx->threadsafe_fn);
 
-  mlx_swift_generate_stream(model_id, prompt_tokens, prompt_length, config_json, stream_ctx, OnStreamEventReceived);
+  bridge_generate_stream(model_id, prompt_tokens, prompt_length, config_json, stream_ctx, OnStreamEventReceived);
 
   free(config_json); // Swift copies this synchronously, safe to free immediately
 
@@ -313,7 +314,7 @@ napi_value init(napi_env env, napi_value exports) {
     if (dladdr((void*)init, &info)) {
       char *path_copy = strdup(info.dli_fname);
       chdir(dirname(path_copy));
-      mlx_swift_init_metal();
+      bridge_metal_load();
       chdir(old_cwd);
       free(path_copy);
     }
