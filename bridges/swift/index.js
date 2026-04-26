@@ -1,15 +1,15 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const mlx = require('mlx-swift') // package.json|exports.require=./mlx.node
+const bridge = require('mlx-swift') // package.json|exports.require=./mlx.node
 
 // API
 
-export const load = mlx.load
-export const unload = mlx.unload
-export const abort = mlx.abort
+export const load = bridge.load
+export const unload = bridge.unload
+export const abort = bridge.abort
 
-export function metrics ({ metrics } = mlx) {
+export function metrics ({ metrics } = bridge) {
   try {
     return JSON.parse(metrics())
   } catch (_) {
@@ -17,38 +17,43 @@ export function metrics ({ metrics } = mlx) {
   }
 }
 
-export const generate = async (modelId, promptTokens, config, { stream } = mlx) => {
+function configJson (config) {
+  if (config.streamChunkSize > 2147483647) throw new Error('StreamChunkSize INT32_MAX=2147483647')
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
+    )
+  )
+}
+
+export const generate = async (modelId, promptTokens, config, { stream } = bridge) => {
+  // we cannot resolve right away
+  // bridge will fire callback twice (once with tokens, once with done & stats)
   return new Promise((resolve, reject) => {
-    const streamChunkSize = 2147483647 // int32_t
-    const configJson = JSON.stringify({ ...config, streamChunkSize })
-    stream(modelId, promptTokens, configJson, (error, tokens, done, stats) => {
+    let bufferedTokens = []
+    stream(modelId, promptTokens, configJson({ ...config, streamChunkSize: 2147483647 }), (error, tokens, done, stats) => {
       if (error) {
         return reject(error)
-      } else if (done) {
+      } else if (tokens) { // done === false
+        bufferedTokens = tokens
+      } else if (done) { // tokens === null
         try {
-          resolve({ tokens, stats: JSON.parse(stats) })
+          resolve({ tokens: bufferedTokens, stats: JSON.parse(stats) })
         } catch (_) {
-          resolve({ tokens })
+          resolve({ tokens: bufferedTokens })
         }
       }
     })
   })
 }
 
-export async function * stream (modelId, prompt, config, { stream } = mlx) {
+export async function * stream (modelId, prompt, config, { stream } = bridge) {
   const queue = []
   let resolveNext = null
   let rejectNext = null
   let isFinished = false
 
-  const configJson = JSON.stringify(
-    Object.fromEntries(
-      Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
-    )
-  )
-
-  // config should be converted into JSON inside here
-  stream(modelId, prompt, configJson, (cause, tokens, done, json) => {
+  stream(modelId, prompt, configJson(config), (cause, tokens, done, json) => {
     if (cause) {
       const error = cause instanceof Error ? cause : new Error(cause?.message || 'Unknown error')
       if (resolveNext) { rejectNext(error); resolveNext = null; rejectNext = null } else queue.push({ err: error })
@@ -82,4 +87,4 @@ export async function * stream (modelId, prompt, config, { stream } = mlx) {
   }
 }
 
-export default mlx
+export default bridge
