@@ -3,8 +3,7 @@ import fs, { readFile } from 'node:fs/promises'
 import { inspect } from 'node:util'
 import { join } from 'node:path'
 
-import mlx from 'mlx-node/swift'
-
+import * as mlx from 'mlx-node/swift'
 import * as tokenizers from '@huggingface/tokenizers'
 import * as jinja from '@huggingface/jinja'
 
@@ -32,9 +31,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
 
     let loaded = true
     const unload = () => {
-      if (loaded && unload(modelId)) {
-        loaded = false
-      }
+      if (loaded && unload(modelId)) loaded = false
     }
 
     return {
