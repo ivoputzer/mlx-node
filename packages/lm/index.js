@@ -40,7 +40,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
         if (!prompt) throw new Error('Prompt must be a string or an array of messages')
         if (!loaded) throw new Error('Model is not loaded')
 
-        if (config.signal?.aborted) throw new Error('AbortError') // aborted by user
+        if (config.signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' }) // aborted by user
 
         const abortHandler = native.abort.bind(native, modelId)
         const promptTokens = new Int32Array(
@@ -50,12 +50,12 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
               : prompt
           ).ids
         )
-
+        config?.signal?.addEventListener('abort', abortHandler, { once: true })
         try {
-          config?.signal?.addEventListener('abort', abortHandler, { once: true })
           const { tokens, stats } = await native.generate(modelId, promptTokens, config)
-          const text = tokenizer.decode(Array.from(tokens)) // tokens=Int32Array
-          return { text, stats }
+          // fixme: when user aborts while generate is running 🤔 TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))
+          if (config.signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' })
+          return { stats, text: tokenizer.decode(Array.from(tokens /* Int32Array */)) }
         } finally {
           config?.signal?.removeEventListener('abort', abortHandler)
         }
@@ -64,7 +64,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
         if (!prompt) throw new Error('Prompt must be a string or an array of messages')
         if (!loaded) throw new Error('Model is not loaded')
 
-        if (config.signal?.aborted) throw new Error('AbortError')
+        if (config.signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' })
 
         const abortHandler = native.abort.bind(native, modelId)
         const promptTokens = new Int32Array(
