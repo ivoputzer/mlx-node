@@ -13,8 +13,6 @@ extern void mlx_swift_load_model(const char *path, void *context, void (*callbac
 extern int32_t mlx_swift_unload_model(int32_t model_id);
 extern void mlx_swift_cancel_generate(int32_t model_id);
 extern void mlx_swift_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
-
-// Methods following the new bridge_ extern convention
 extern char* bridge_metrics(void);
 
 // --- Structs ---
@@ -43,20 +41,21 @@ typedef struct {
   char *payload;
 } StreamResult;
 
-// --- Cleanup Callbacks (Called by V8 Garbage Collector) ---
+// --- Cleanup Callbacks (V8 Managed) ---
 static void FinalizePromiseContext(napi_env env, void* finalize_data, void* finalize_hint) {
-  free(finalize_data);
+  if (finalize_data != NULL) free(finalize_data);
 }
 
 static void FinalizeStreamContext(napi_env env, void* finalize_data, void* finalize_hint) {
-  free(finalize_data);
+  if (finalize_data != NULL) free(finalize_data);
 }
 
 // --- Load Callbacks ---
 static void CallJsPromise(napi_env env, napi_value js_cb, void *context, void *data) {
   PromiseContext *ctx = (PromiseContext *)context;
   PromiseResult *result = (PromiseResult *)data;
-  if (env != NULL) {
+
+  if (env != NULL && ctx != NULL) {
     if (result->success) {
       napi_value js_result;
       napi_create_int32(env, result->model_id, &js_result);
@@ -69,6 +68,7 @@ static void CallJsPromise(napi_env env, napi_value js_cb, void *context, void *d
       napi_reject_deferred(env, ctx->deferred, error);
     }
   }
+
   if (result->payload) free(result->payload);
   free(result);
 }
@@ -84,6 +84,7 @@ static void SwiftLoadPromiseCallback(void *context, bool success, int32_t model_
     if (result->payload) free(result->payload);
     free(result);
   }
+
   napi_release_threadsafe_function(ctx->tsfn, napi_tsfn_release);
 }
 
@@ -127,7 +128,6 @@ static void CallJsStream(napi_env env, napi_value js_cb, void *context, void *da
     napi_call_function(env, global, js_cb, 4, argv, NULL);
   }
 
-  // Free data memory
   if (result->tokens) free(result->tokens);
   if (result->payload) free(result->payload);
   free(result);
@@ -149,7 +149,6 @@ static void SwiftStreamCallback(void *context, const int32_t *tokens, int32_t co
     result->tokens = NULL;
   }
 
-  // CRITICAL FIX: If queue is closed (e.g. JS aborted abruptly), free memory immediately!
   if (napi_call_threadsafe_function(ctx->tsfn, result, napi_tsfn_nonblocking) != napi_ok) {
     if (result->tokens) free(result->tokens);
     if (result->payload) free(result->payload);
@@ -170,7 +169,7 @@ napi_value Metrics(napi_env env, napi_callback_info info) {
     napi_create_string_utf8(env, "{}", NAPI_AUTO_LENGTH, &result);
   } else {
     napi_create_string_utf8(env, json_str, NAPI_AUTO_LENGTH, &result);
-    free(json_str); // Prevent memory leak!
+    free(json_str);
   }
 
   return result;
@@ -192,14 +191,13 @@ napi_value LoadModel(napi_env env, napi_callback_info info) {
   napi_create_promise(env, &ctx->deferred, &promise);
   napi_create_string_utf8(env, "MLXLoad", NAPI_AUTO_LENGTH, &resource_name);
 
-  // Notice the FinalizePromiseContext callback here!
-  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, NULL, FinalizePromiseContext, ctx, CallJsPromise, &ctx->tsfn);
+  // CORRECT: Passed `ctx` to both finalizer_data and context
+  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, ctx, FinalizePromiseContext, ctx, CallJsPromise, &ctx->tsfn);
 
   mlx_swift_load_model(path, ctx, SwiftLoadPromiseCallback);
   return promise;
 }
 
-// UnloadModel & CancelGenerate identical to last iteration...
 napi_value UnloadModel(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value args[1];
@@ -242,10 +240,9 @@ napi_value GenerateStream(napi_env env, napi_callback_info info) {
   int32_t* prompt_tokens = (int32_t*)((char*)data + byte_offset);
   int32_t prompt_length = (int32_t)length;
 
-  // DYNAMICALLY ALLOCATE CONFIG_JSON TO SUPPORT ANY LENGTH
   size_t str_len;
-  napi_get_value_string_utf8(env, args[2], NULL, 0, &str_len); // pass NULL first to get the exact length of the JSON string
-  char* config_json = (char*)malloc(str_len + 1); // malloc the exact size + 1 (for the \0 null terminator)
+  napi_get_value_string_utf8(env, args[2], NULL, 0, &str_len);
+  char* config_json = (char*)malloc(str_len + 1);
   napi_get_value_string_utf8(env, args[2], config_json, str_len + 1, &str_len);
 
   napi_value js_callback = args[3];
@@ -255,11 +252,12 @@ napi_value GenerateStream(napi_env env, napi_callback_info info) {
   napi_value resource_name;
   napi_create_string_utf8(env, "MLXStream", NAPI_AUTO_LENGTH, &resource_name);
 
-  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, FinalizeStreamContext, ctx, CallJsStream, &ctx->tsfn);
+  // CORRECT: Passed `ctx` to both finalizer_data and context
+  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, ctx, FinalizeStreamContext, ctx, CallJsStream, &ctx->tsfn);
 
   mlx_swift_generate_stream(model_id, prompt_tokens, prompt_length, config_json, ctx, SwiftStreamCallback);
 
-  free(config_json); // Swift has already copied it synchronously via String(cString:)
+  free(config_json);
 
   napi_value undefined;
   napi_get_undefined(env, &undefined);
@@ -267,7 +265,6 @@ napi_value GenerateStream(napi_env env, napi_callback_info info) {
 }
 
 napi_value init(napi_env env, napi_value exports) {
-  // [CWD Metal init hook from before...]
   char old_cwd[1024];
   if (getcwd(old_cwd, sizeof(old_cwd)) != NULL) {
     Dl_info info;

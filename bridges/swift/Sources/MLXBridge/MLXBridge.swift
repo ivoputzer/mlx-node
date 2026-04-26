@@ -158,6 +158,13 @@ public func generateStream(
             return
         }
 
+        var tokenBuffer = [Int32]()
+        tokenBuffer.reserveCapacity(chunkSize)
+
+        var finalStats: GenerateCompletionInfo? = nil
+        var finalErrorStr: String? = nil
+        var wasCancelled = false
+
         do {
             let input = LMInput(tokens: MLXArray(tokens))
             let parameters = configObj.toGenerateParameters()
@@ -168,12 +175,6 @@ public func generateStream(
                 context: modelCtx,
                 includeStopToken: true
             )
-
-            var tokenBuffer = [Int32]()
-            tokenBuffer.reserveCapacity(chunkSize)
-
-            var finalStats: GenerateCompletionInfo? = nil
-            var wasCancelled = false
 
             for await event in stream {
                 if Task.isCancelled {
@@ -197,52 +198,59 @@ public func generateStream(
                 }
             }
 
-            // --- GUARANTEED TERMINAL BLOCK ---
-
-            // 1. Flush any remaining tokens
-            if !tokenBuffer.isEmpty {
-                tokenBuffer.withUnsafeBufferPointer { ptr in
-                    callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
-                }
-            }
-
-            // 2. Fire EXACTLY ONE terminal callback
-            if wasCancelled {
-                "Generation Cancelled".withCString { cStr in
-                    callback(context, nil, 0, true, true, cStr)
-                }
-            } else if let stats = finalStats {
-                let statsDict: [String: Any] = [
-                    "promptTokens": stats.promptTokenCount,
-                    "generatedTokens": stats.generationTokenCount,
-                    "promptTime": stats.promptTime,
-                    "generateTime": stats.generateTime,
-                    "promptTokensPerSecond": stats.promptTokensPerSecond,
-                    "tokensPerSecond": stats.tokensPerSecond,
-                    "stopReason": String(describing: stats.stopReason)
-                ]
-
-                if let jsonData = try? JSONSerialization.data(withJSONObject: statsDict),
-                   let jsonStr = String(data: jsonData, encoding: .utf8) {
-                    jsonStr.withCString { cStr in
-                        callback(context, nil, 0, true, false, cStr)
-                    }
-                } else {
-                    callback(context, nil, 0, true, false, nil)
-                }
-            } else {
-                // Failsafe if stream ended with no stats
-                callback(context, nil, 0, true, false, nil)
-            }
-
-            // Cleanup
-            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
+            // Re-assert in case MLX quietly swallowed cancellation
+            if Task.isCancelled { wasCancelled = true }
 
         } catch {
-            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
-            error.localizedDescription.withCString { cStr in
+            if error is CancellationError {
+                wasCancelled = true
+            } else {
+                finalErrorStr = error.localizedDescription
+            }
+        }
+
+        // --- 1. Flush any remaining tokens ---
+        if !tokenBuffer.isEmpty {
+            tokenBuffer.withUnsafeBufferPointer { ptr in
+                callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
+            }
+        }
+
+        // --- 2. PERFORM ALL SWIFT CLEANUP EARLY ---
+        // This prevents the Teardown Race! If we do this AFTER the callback,
+        // the Node.js process might have exited and unmapped this memory block!
+        _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
+
+        // --- 3. FIRE GUARANTEED TERMINAL CALLBACK ---
+        if wasCancelled {
+            "Generation Cancelled".withCString { cStr in
                 callback(context, nil, 0, true, true, cStr)
             }
+        } else if let errorStr = finalErrorStr {
+            errorStr.withCString { cStr in
+                callback(context, nil, 0, true, true, cStr)
+            }
+        } else if let stats = finalStats {
+            let statsDict: [String: Any] = [
+                "promptTokens": stats.promptTokenCount,
+                "generatedTokens": stats.generationTokenCount,
+                "promptTime": stats.promptTime,
+                "generateTime": stats.generateTime,
+                "promptTokensPerSecond": stats.promptTokensPerSecond,
+                "tokensPerSecond": stats.tokensPerSecond,
+                "stopReason": String(describing: stats.stopReason)
+            ]
+
+            if let jsonData = try? JSONSerialization.data(withJSONObject: statsDict),
+               let jsonStr = String(data: jsonData, encoding: .utf8) {
+                jsonStr.withCString { cStr in
+                    callback(context, nil, 0, true, false, cStr)
+                }
+            } else {
+                callback(context, nil, 0, true, false, nil)
+            }
+        } else {
+            callback(context, nil, 0, true, false, nil)
         }
     }
 

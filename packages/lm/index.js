@@ -53,8 +53,13 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
         config?.signal?.addEventListener('abort', abortHandler, { once: true })
         try {
           const { tokens, stats } = await native.generate(modelId, promptTokens, config)
-          if (config.signal?.aborted) throw new AbortError() // fixme: when user aborts while generate is running 🤔 TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))
-          return { stats, text: tokenizer.decode(Array.from(tokens /* Int32Array */)) }
+          if (config.signal?.aborted) throw new AbortError()
+          return { stats, text: tokenizer.decode(Array.from(tokens)) }
+        } catch (error) {
+          if (error.message?.includes('Cancelled') || error.message?.includes('Abort')) {
+            throw new AbortError()
+          }
+          throw error
         } finally {
           config?.signal?.removeEventListener('abort', abortHandler)
         }
@@ -69,7 +74,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
         const promptTokens = new Int32Array(
           tokenizer.encode(
             Array.isArray(prompt)
-              ? template.render({ messages: prompt, add_generation_prompt: true }) // tools: config.tools || [], add_generation_prompt: config.add_generation_prompt || true,  ...tokenizer.config
+              ? template.render({ messages: prompt, add_generation_prompt: true })
               : prompt
           ).ids
         )
@@ -78,12 +83,8 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
           config?.signal?.addEventListener('abort', abortHandler, { once: true })
 
           const tokenBuffer = []
-
-          // Get the async iterator from mlx-node
-          // JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
           const nativeStream = native.stream(modelId, promptTokens, config)
 
-          // Pass it to our pure formatting function
           while (true) {
             const { value, done } = await nativeStream.next()
 
@@ -106,11 +107,14 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
 
             if (chunk.length > 0) {
               yield { text: chunk, done: false }
-              tokenBuffer.length = 0 // so we can use a const instead of let 🤔
+              tokenBuffer.length = 0
             }
           }
         } catch (error) {
-          if (error.message.includes('Cancelled') || error.message.includes('Abort')) return
+          if (error.message?.includes('Cancelled') || error.message?.includes('Abort')) {
+            yield { done: true, finish: 'abort', stats: null } // Yielding an abort frame avoids unhandled rejections during UI updates
+            return
+          }
           throw error
         } finally {
           config?.signal?.removeEventListener('abort', abortHandler)

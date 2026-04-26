@@ -50,7 +50,7 @@ export async function * stream (modelId, prompt, config, { stream } = mlx) {
   // config should be converted into JSON inside here
   stream(modelId, prompt, configJson, (cause, tokens, done, json) => {
     if (cause) {
-      const error = new Error(cause.message, { cause })
+      const error = cause instanceof Error ? cause : new Error(cause?.message || 'Unknown error')
       if (resolveNext) { rejectNext(error); resolveNext = null; rejectNext = null } else queue.push({ err: error })
       isFinished = true
     } else if (done) {
