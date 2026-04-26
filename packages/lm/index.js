@@ -31,7 +31,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
 
     let loaded = true
     const unload = () => {
-      if (loaded && unload(modelId)) loaded = false
+      if (loaded && mlx.unload(modelId)) loaded = false
     }
 
     return {
