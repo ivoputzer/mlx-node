@@ -18,9 +18,10 @@ export function metrics ({ metrics } = mlx) {
 }
 
 export const generate = async (modelId, promptTokens, config, { stream } = mlx) => {
-  const streamChunkSize = 2147483647 // int32_t
   return new Promise((resolve, reject) => {
-    stream(modelId, promptTokens, JSON.stringify({ ...config, streamChunkSize }), (error, tokens, done, stats) => {
+    const streamChunkSize = 2147483647 // int32_t
+    const configJson = JSON.stringify({ ...config, streamChunkSize })
+    stream(modelId, promptTokens, configJson, (error, tokens, done, stats) => {
       if (error) {
         return reject(error)
       } else if (done) {
@@ -34,17 +35,17 @@ export const generate = async (modelId, promptTokens, config, { stream } = mlx) 
   })
 }
 
-export async function * stream (modelId, prompt, configJson, { stream } = mlx) {
+export async function * stream (modelId, prompt, config, { stream } = mlx) {
   const queue = []
   let resolveNext = null
   let rejectNext = null
   let isFinished = false
 
-  // const configJson = JSON.stringify(
-  //   Object.fromEntries(
-  //     Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
-  //   )
-  // )
+  const configJson = JSON.stringify(
+    Object.fromEntries(
+      Object.entries(config).filter(([key]) => ['streamChunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
+    )
+  )
 
   // config should be converted into JSON inside here
   stream(modelId, prompt, configJson, (cause, tokens, done, json) => {
