@@ -287,7 +287,7 @@ napi_value init(napi_env env, napi_value exports) {
       {"abort", NULL, CancelGenerate, NULL, NULL, NULL, napi_default, NULL},
       {"metrics", NULL, Metrics, NULL, NULL, NULL, napi_default, NULL}
   };
-  napi_define_properties(env, exports, 4, desc);
+  napi_define_properties(env, exports, 5, desc);
   return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
