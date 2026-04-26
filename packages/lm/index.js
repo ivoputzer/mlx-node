@@ -53,8 +53,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
         config?.signal?.addEventListener('abort', abortHandler, { once: true })
         try {
           const { tokens, stats } = await native.generate(modelId, promptTokens, config)
-          // fixme: when user aborts while generate is running 🤔 TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))
-          if (config.signal?.aborted) throw new AbortError()
+          if (config.signal?.aborted) throw new AbortError() // fixme: when user aborts while generate is running 🤔 TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))
           return { stats, text: tokenizer.decode(Array.from(tokens /* Int32Array */)) }
         } finally {
           config?.signal?.removeEventListener('abort', abortHandler)
@@ -125,7 +124,7 @@ export async function load (path, options = {}, { Tokenizer } = tokenizers, { Te
       }
     }
   } catch (err) {
-    throw new Error('Tokenizer configuration missing')
+    throw new Error('Tokenizer configuration missing') // fixme: this error is misleading
   }
 }
 
