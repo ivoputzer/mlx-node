@@ -21,7 +21,7 @@ struct BridgeGenerateConfig: Decodable {
     var frequencyPenalty: Float?
     var frequencyContextSize: Int?
     var prefillStepSize: Int?
-    var streamChunkSize: Int?
+    var chunkSize: Int?
 
     func toGenerateParameters() -> GenerateParameters {
         return GenerateParameters(
@@ -147,7 +147,7 @@ public func generateStream(
     let tokens = Array(buffer).map { Int($0) }
 
     let configObj = parseConfig(String(cString: configJson))
-    let chunkSize = configObj.streamChunkSize ?? 5
+    let chunkSize = configObj.chunkSize ?? 5
 
     let task = Task {
         guard let modelCtx = registryLock.withLock({ modelRegistry[modelId] }) else {
