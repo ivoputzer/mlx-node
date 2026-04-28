@@ -17,43 +17,13 @@ export function metrics ({ metrics } = bridge) {
   }
 }
 
-function configJson (config) {
-  if (config.chunkSize > 2147483647) throw new Error('chunkSize INT32_MAX=2147483647')
-  return JSON.stringify(
-    Object.fromEntries(
-      Object.entries(config).filter(([key]) => ['chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))
-    )
-  )
-}
-
-export const generate = async (modelId, promptTokens, config, { stream } = bridge) => {
-  // we cannot resolve right away
-  // bridge will fire callback twice (once with tokens, once with done & stats)
-  return new Promise((resolve, reject) => {
-    let bufferedTokens = []
-    stream(modelId, promptTokens, configJson({ ...config, chunkSize: 2147483647 }), (error, tokens, done, stats) => {
-      if (error) {
-        return reject(error)
-      } else if (tokens) { // done === false
-        bufferedTokens = tokens
-      } else if (done) { // tokens === null
-        try {
-          resolve({ tokens: bufferedTokens, stats: JSON.parse(stats) })
-        } catch (_) {
-          resolve({ tokens: bufferedTokens })
-        }
-      }
-    })
-  })
-}
-
-export async function * stream (modelId, prompt, config, { stream } = bridge) {
+export async function * generate (modelId, promptTokens, config, { stream } = bridge) {
   const queue = []
   let resolveNext = null
   let rejectNext = null
   let isFinished = false
 
-  stream(modelId, prompt, configJson(config), (cause, tokens, done, json) => {
+  stream(modelId, promptTokens, configFrom(config), (cause, tokens, done, json) => {
     if (cause) {
       const error = cause instanceof Error ? cause : new Error(cause?.message || 'Unknown error')
       if (resolveNext) { rejectNext(error); resolveNext = null; rejectNext = null } else queue.push({ err: error })
@@ -88,3 +58,33 @@ export async function * stream (modelId, prompt, config, { stream } = bridge) {
 }
 
 export default bridge
+
+// HELPERS
+
+function configFrom (config) {
+  if (config.chunkSize > 2147483647) throw new Error('ChunkSize exceeds INT32_MAX (2147483647)')
+
+  const allowedKeys = [
+    'chunkSize',
+    'maxTokens',
+    'maxKVSize',
+    'kvBits',
+    'kvGroupSize',
+    'quantizedKVStart',
+    'temperature',
+    'topP',
+    'topK',
+    'minP',
+    'repetitionPenalty',
+    'repetitionContextSize',
+    'presencePenalty',
+    'presenceContextSize',
+    'frequencyPenalty',
+    'frequencyContextSize',
+    'prefillStepSize'
+  ]
+
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(config).filter(([key]) => allowedKeys.includes(key)))
+  )
+}
