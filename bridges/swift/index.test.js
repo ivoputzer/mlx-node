@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 
-import { metrics, load, unload, stream, generate, abort } from 'mlx-swift'
+import mlx, { metrics, load, unload, abort, generate } from 'mlx-swift'
 
 describe('mlx-swift (native bridge)', () => {
   it('Supports both require and import', () => {
@@ -18,7 +18,6 @@ describe('mlx-swift (native bridge)', () => {
     strictEqual(typeof load, 'function', 'load should be exported')
     strictEqual(typeof unload, 'function', 'unload should be exported')
     strictEqual(typeof generate, 'function', 'generate should be exported')
-    strictEqual(typeof stream, 'function', 'stream should be exported')
     strictEqual(typeof abort, 'function', 'abort should be exported')
   })
 
@@ -37,7 +36,7 @@ describe('mlx-swift (native bridge)', () => {
         // In C-bridge, success=false triggers napi_reject_deferred.
         // Ensure this actually throws a JS error instead of segfaulting.
         (error) => {
-          strictEqual(error.code, 'MLX_ERR', 'Error should have custom code MLX_ERR')
+          strictEqual(error.code, 'MLX_LOAD_ERR', 'Error should have custom code MLX_LOAD_ERR')
           ok(error.message.length > 0, 'Error should have a message from Swift')
           return true
         },
@@ -54,13 +53,6 @@ describe('mlx-swift (native bridge)', () => {
   })
 
   describe('.generate', () => {
-    // todo
-    it.todo('serializes valid configuration into json')
-    it.todo('skips invalid configuration parameters json')
-  })
-
-  describe('.stream', () => {
-    // todo
     it.todo('serializes valid configuration into json')
     it.todo('skips invalid configuration parameters json')
 
@@ -68,28 +60,35 @@ describe('mlx-swift (native bridge)', () => {
       const streamMock = mock.fn((id, tokens, config, cb) => {
         cb(null, new Int32Array([1, 2]), false, null)
         cb(null, new Int32Array([3, 4]), false, null)
-        cb(null, null, true, '{"stopReason":"stop"}') // GPU is super fast: fires everything synchronously before JS can pull
+        cb(null, null, true, '{"stopReason":"stop"}') // GPU is super fast
       })
 
-      const chunks = stream(1, new Int32Array([99]), { temperature: 0.7 }, { stream: streamMock })
+      const chunks = generate(1, new Int32Array([99]), { temperature: 0.7 }, { stream: streamMock })
 
-      // JS is slow, pulls from the queue after it's already full
       const result1 = await chunks.next()
-      deepEqual(result1.value, new Int32Array([1, 2]))
-      equal(result1.done, false)
+      strictEqual(result1.value, 1)
+      strictEqual(result1.done, false)
 
       const result2 = await chunks.next()
-      deepEqual(result2.value, new Int32Array([3, 4]))
-      equal(result2.done, false)
+      strictEqual(result2.value, 2)
+      strictEqual(result2.done, false)
 
       const result3 = await chunks.next()
-      deepEqual(result3.value.stopReason, 'stop') // stats
-      equal(result3.done, true)
+      strictEqual(result3.value, 3)
+      strictEqual(result3.done, false)
+
+      const result4 = await chunks.next()
+      strictEqual(result4.value, 4)
+      strictEqual(result4.done, false)
+
+      const result5 = await chunks.next()
+      strictEqual(result5.value.stopReason, 'stop') // stats
+      strictEqual(result5.done, true)
 
       // Verify the C-Bridge was called correctly
-      equal(streamMock.mock.calls.length, 1)
-      equal(streamMock.mock.calls[0].arguments[0], 1) // modelId
-      deepEqual(streamMock.mock.calls[0].arguments[2], JSON.stringify({ temperature: 0.7 })) // config:GenerationProperties
+      strictEqual(streamMock.mock.calls.length, 1)
+      strictEqual(streamMock.mock.calls[0].arguments[0], 1) // modelId
+      strictEqual(streamMock.mock.calls[0].arguments[2], JSON.stringify({ temperature: 0.7 }))
     })
 
     it('Handles JS being faster than GPU (JS awaits Promises)', async ({ mock }) => {
@@ -98,7 +97,7 @@ describe('mlx-swift (native bridge)', () => {
         storedCallback = cb // Keep the callback to trigger manually
       })
 
-      const chunks = stream(1, new Int32Array([]), {}, { stream: streamMock })
+      const chunks = generate(1, new Int32Array([]), {}, { stream: streamMock })
 
       // JS asks for next token before C has provided it. Promise is created internally.
       const promise1 = chunks.next()
@@ -107,7 +106,7 @@ describe('mlx-swift (native bridge)', () => {
       setTimeout(() => storedCallback(null, new Int32Array([99]), false, null), 5)
 
       const result1 = await promise1
-      deepEqual(result1.value, new Int32Array([99]))
+      strictEqual(result1.value, 99) // Unrolled from array
 
       // Ask for stats
       const promise2 = chunks.next()
@@ -115,8 +114,8 @@ describe('mlx-swift (native bridge)', () => {
 
       const result2 = await promise2
 
-      equal(result2.done, true)
-      equal(result2.value.stopReason, 'length')
+      strictEqual(result2.done, true)
+      strictEqual(result2.value.stopReason, 'length')
     })
 
     it('Handles c-bridge errors correctly', async ({ mock }) => {
@@ -125,11 +124,11 @@ describe('mlx-swift (native bridge)', () => {
         cb(new Error('Metal out of memory'), null, true, null) // GPU outputs one chunk, then crashes
       })
 
-      const chunks = stream(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
       const { value, done } = await chunks.next()
 
-      deepEqual(value, new Int32Array([10]))
-      deepEqual(done, false)
+      strictEqual(value, 10) // Unrolled from array
+      strictEqual(done, false)
 
       await rejects(async () => await chunks.next(), { message: 'Metal out of memory' })
     })
@@ -139,11 +138,11 @@ describe('mlx-swift (native bridge)', () => {
         cb(null, null, true, '{"broken_json: oops')
       })
 
-      const chunks = stream(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
       const { done, value } = await chunks.next()
 
-      equal(done, true)
-      equal(value, null) // Gracefully falls back to null instead of throwing
+      strictEqual(done, true)
+      strictEqual(value, null) // Gracefully falls back to null instead of throwing
     })
 
     it('Handles multiple parallel streams without crossing wires', async ({ mock }) => {
@@ -156,10 +155,12 @@ describe('mlx-swift (native bridge)', () => {
 
       // Launch 50 streams in parallel
       const streams = Array.from({ length: 50 }, async (_, i) => {
-        const chunks = stream(i, new Int32Array([]), '{}', { stream: streamFm })
+        const chunks = generate(i, new Int32Array([]), '{}', { stream: streamFm })
         const result = await chunks.next() // Get first token
         const stats = await chunks.next() // Get stats (done)
-        return { token: result.value[0], statsId: stats.value.id }
+
+        // Notice result.value is now directly the number, not result.value[0]
+        return { token: result.value, statsId: stats.value.id }
       })
 
       const results = await Promise.all(streams)
@@ -178,7 +179,7 @@ describe('mlx-swift (native bridge)', () => {
         storedCallback = cb
       })
 
-      const chunks = stream(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
 
       // 1. Ask for the first token (JS is now awaiting)
       const firstPromise = chunks.next()
@@ -199,26 +200,22 @@ describe('mlx-swift (native bridge)', () => {
       const r3 = await chunks.next()
       const r4 = await chunks.next()
 
-      deepEqual(r1.value, new Int32Array([1]))
-      deepEqual(r2.value, new Int32Array([2]))
-      deepEqual(r3.value, new Int32Array([3]))
+      strictEqual(r1.value, 1)
+      strictEqual(r2.value, 2)
+      strictEqual(r3.value, 3)
       strictEqual(r4.done, true)
     })
 
     it('Handles late-arriving callbacks after the stream is closed', async (t) => {
       let storedCallback
       const streamFn = t.mock.fn((id, tokens, config, cb) => {
-        storedCallback = cb // This only runs AFTER stream.next() is called
+        storedCallback = cb
       })
 
-      const chunks = stream(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
 
       // 1. PRIME THE GENERATOR
-      // We call .next() but we don't await it yet because it's waiting for a callback
       const firstRequest = chunks.next()
-
-      // Now, the generator body has executed up to the native call,
-      // so storedCallback IS a function.
       strictEqual(typeof storedCallback, 'function')
 
       // 2. Force a crash
@@ -228,15 +225,9 @@ describe('mlx-swift (native bridge)', () => {
       await rejects(firstRequest, { message: 'First Error' })
 
       // 4. Test the "Late" callback
-      // This simulates the Swift thread firing again even though JS is done.
-      // It should not throw because our C-callback logic handles TSFN release.
       doesNotThrow(() => {
         storedCallback(null, new Int32Array([99]), false, null)
       })
     })
-  })
-
-  describe('.abort', () => {
-    // todo
   })
 })

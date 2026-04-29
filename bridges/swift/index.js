@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const bridge = require('mlx-swift') // package.json|exports.require=./mlx.node
+const bridge = require('mlx-swift') // package.json (exports.require=mlx.node)
 
 // API
 
@@ -10,56 +10,50 @@ export const unload = bridge.unload
 export const abort = bridge.abort
 
 export function metrics ({ metrics } = bridge) {
-  try {
-    return JSON.parse(metrics())
-  } catch (_) {
-    return {}
-  }
+  return parseSafe(metrics())
 }
 
-export async function * generate (modelId, promptTokens, config, { stream } = bridge) {
+export async function * generate (modelId, promptTokens, config = {}, { stream } = bridge) {
   const queue = []
-  let resolveNext = null
-  let rejectNext = null
-  let isFinished = false
+  let resume = null
 
-  stream(modelId, promptTokens, configFrom(config), (cause, tokens, done, json) => {
-    if (cause) {
-      const error = cause instanceof Error ? cause : new Error(cause?.message || 'Unknown error')
-      if (resolveNext) { rejectNext(error); resolveNext = null; rejectNext = null } else queue.push({ err: error })
-      isFinished = true
-    } else if (done) {
-      let stats = null
-      if (json) try { stats = JSON.parse(json) } catch (e) {}
-      if (resolveNext) { resolveNext({ done: true, stats }); resolveNext = null; rejectNext = null } else queue.push({ done: true, stats })
-      isFinished = true
-    } else if (tokens) {
-      if (resolveNext) { resolveNext({ tokens }); resolveNext = null; rejectNext = null } else queue.push({ tokens })
+  stream(modelId, promptTokens, configFrom(config), (error, tokens, done, json) => {
+    queue.push({ error, tokens, done, json })
+    if (resume) {
+      resume()
+      resume = null
     }
   })
 
   while (true) {
-    let item
-    if (queue.length > 0) {
-      item = queue.shift()
-    } else if (isFinished) {
-      break
-    } else {
-      item = await new Promise((resolve, reject) => {
-        resolveNext = resolve
-        rejectNext = reject
-      })
+    if (queue.length === 0) {
+      const { promise, resolve } = Promise.withResolvers() // better than closure for gc
+      resume = resolve
+      await promise
     }
 
-    if (item.err) throw item.err
-    if (item.done) return item.stats // RETURN THE STATS!
-    yield item.tokens // YIELD RAW ARRAYS!
+    const unqueue = queue.splice(0, queue.length)
+
+    for (const { error, tokens, done, json } of unqueue) {
+      if (error) throw error
+      if (done) return parseSafe(json)
+      if (tokens) yield * tokens
+    }
   }
 }
 
 export default bridge
 
 // HELPERS
+
+function parseSafe (json, fallback = null) {
+  if (!json) return fallback // fast path for empty responses
+  try {
+    return JSON.parse(json)
+  } catch {
+    return fallback
+  }
+}
 
 function configFrom (config) {
   if (config.chunkSize > 2147483647) throw new Error('ChunkSize exceeds INT32_MAX (2147483647)')
