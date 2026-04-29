@@ -264,8 +264,18 @@ napi_value Export_AbortGeneration(napi_env env, napi_callback_info info) {
   napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 
+  if (argc < 1) {
+    napi_throw_type_error(env, "MLX_ERR", "modelId argument is required");
+    return NULL;
+  }
+
   int32_t model_id;
-  napi_get_value_int32(env, args[0], &model_id);
+  napi_status status = napi_get_value_int32(env, args[0], &model_id);
+
+  if (status != napi_ok) {
+    napi_throw_type_error(env, "MLX_ERR", "modelId must be an integer");
+    return NULL;
+  }
 
   bridge_generate_abort(model_id);
 

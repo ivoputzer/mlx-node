@@ -230,4 +230,35 @@ describe('mlx-swift (native bridge)', () => {
       })
     })
   })
+
+  describe('.abort', () => {
+    it('Executes successfully and returns undefined for valid IDs', () => {
+      doesNotThrow(() => {
+        // Even if the model doesn't exist, Swift should safely ignore it
+        // (assuming activeTasks.removeValue handles missing keys safely)
+        const result = abort(99999)
+        strictEqual(result, undefined, 'abort should return undefined')
+      })
+    })
+
+    it('Throws a TypeError when called without arguments', () => {
+      try {
+        abort()
+        throw new Error('Should have thrown')
+      } catch (err) {
+        strictEqual(err.name, 'TypeError')
+        ok(err.message.includes('required'), 'Should complain about missing argument')
+      }
+    })
+
+    it('Throws a TypeError when called with invalid argument types', () => {
+      try {
+        abort('llama-3')
+        throw new Error('Should have thrown')
+      } catch (err) {
+        strictEqual(err.name, 'TypeError')
+        ok(err.message.includes('integer'), 'Should complain about wrong type')
+      }
+    })
+  })
 })
