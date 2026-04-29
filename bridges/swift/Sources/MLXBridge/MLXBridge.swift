@@ -134,6 +134,19 @@ public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
     return strdup(jsonStr)
 }
 
+import Foundation
+
+// Idiomatic, type-safe struct for high-speed JSON serialization
+private struct GenerateStats: Encodable {
+    let promptTokens: Int
+    let generatedTokens: Int
+    let promptTime: Double
+    let generateTime: Double
+    let promptTokensPerSecond: Double
+    let tokensPerSecond: Double
+    let stopReason: String
+}
+
 @_cdecl("bridge_generate_stream")
 public func generateStream(
     modelId: Int32,
@@ -143,13 +156,20 @@ public func generateStream(
     context: UnsafeMutableRawPointer,
     callback: @convention(c) (UnsafeMutableRawPointer, UnsafePointer<Int32>?, Int32, Bool, Bool, UnsafePointer<CChar>?) -> Void
 ) {
+    // Zero-copy array mapping from UnsafeBufferPointer
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
 
     let configObj = parseConfig(String(cString: configJson))
-    let chunkSize = configObj.chunkSize ?? 5
+    let chunkSize = Int(configObj.chunkSize ?? 5) // Ensure Int for comparisons
 
     let task = Task {
+        // DEFER: Guarantees cleanup executing immediately before the Task ends,
+        // no matter how the Task exits (success, throw, or cancellation).
+        defer {
+            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
+        }
+
         guard let modelCtx = registryLock.withLock({ modelRegistry[modelId] }) else {
             "Error: Model ID not found".withCString { cStr in
                 callback(context, nil, 0, true, true, cStr)
@@ -157,6 +177,7 @@ public func generateStream(
             return
         }
 
+        // Pre-allocate buffer to prevent repeated heap allocations
         var tokenBuffer = [Int32]()
         tokenBuffer.reserveCapacity(chunkSize)
 
@@ -186,9 +207,12 @@ public func generateStream(
                     tokenBuffer.append(Int32(tokenId))
 
                     if tokenBuffer.count >= chunkSize {
+                        // Pointer is valid ONLY inside this block, which is safe because
+                        // our C code deep-copies it synchronously into the Arena block.
                         tokenBuffer.withUnsafeBufferPointer { ptr in
                             callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
                         }
+                        // Keeps allocated heap block intact
                         tokenBuffer.removeAll(keepingCapacity: true)
                     }
 
@@ -201,9 +225,8 @@ public func generateStream(
             if Task.isCancelled { wasCancelled = true }
 
         } catch {
-            if error is CancellationError {
-                wasCancelled = true
-            } else {
+            wasCancelled = error is CancellationError
+            if !wasCancelled {
                 finalErrorStr = error.localizedDescription
             }
         }
@@ -215,12 +238,7 @@ public func generateStream(
             }
         }
 
-        // --- 2. PERFORM ALL SWIFT CLEANUP EARLY ---
-        // This prevents the Teardown Race! If we do this AFTER the callback,
-        // the Node.js process might have exited and unmapped this memory block!
-        _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
-
-        // --- 3. FIRE GUARANTEED TERMINAL CALLBACK ---
+        // --- 2. FIRE GUARANTEED TERMINAL CALLBACK ---
         if wasCancelled {
             "Generation Cancelled".withCString { cStr in
                 callback(context, nil, 0, true, true, cStr)
@@ -230,17 +248,18 @@ public func generateStream(
                 callback(context, nil, 0, true, true, cStr)
             }
         } else if let stats = finalStats {
-            let statsDict: [String: Any] = [
-                "promptTokens": stats.promptTokenCount,
-                "generatedTokens": stats.generationTokenCount,
-                "promptTime": stats.promptTime,
-                "generateTime": stats.generateTime,
-                "promptTokensPerSecond": stats.promptTokensPerSecond,
-                "tokensPerSecond": stats.tokensPerSecond,
-                "stopReason": String(describing: stats.stopReason)
-            ]
+            let statsStruct = GenerateStats(
+                promptTokens: stats.promptTokenCount,
+                generatedTokens: stats.generationTokenCount,
+                promptTime: stats.promptTime,
+                generateTime: stats.generateTime,
+                promptTokensPerSecond: stats.promptTokensPerSecond,
+                tokensPerSecond: stats.tokensPerSecond,
+                stopReason: String(describing: stats.stopReason)
+            )
 
-            if let jsonData = try? JSONSerialization.data(withJSONObject: statsDict),
+            // Native JSON serialization using Encodable
+            if let jsonData = try? JSONEncoder().encode(statsStruct),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
                 jsonStr.withCString { cStr in
                     callback(context, nil, 0, true, false, cStr)

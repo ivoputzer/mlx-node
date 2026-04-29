@@ -13,8 +13,10 @@
 extern void bridge_metal_load(void);
 extern void bridge_model_load(const char *path, void *context, void (*callback)(void *, bool, int32_t, const char *));
 extern int32_t bridge_model_unload(int32_t model_id);
-extern void bridge_generate_abort(int32_t model_id);
+
 extern void bridge_generate_stream(int32_t model_id, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
+extern void bridge_generate_abort(int32_t model_id);
+
 extern char* bridge_metrics(void);
 
 
@@ -40,11 +42,12 @@ typedef struct {
 } ModelLoadEventData;
 
 typedef struct {
-  int32_t *tokens;
   int32_t token_count;
   bool is_done;
   bool is_error;
-  char *payload;
+  size_t payload_len;
+  int32_t *tokens;
+  const char *payload;
 } StreamEventData;
 
 
@@ -115,19 +118,26 @@ static void EmitStreamEventOnMainThread(napi_env env, napi_value js_callback, vo
   StreamEventData *event_data = (StreamEventData *)data;
 
   if (env != NULL && js_callback != NULL) {
-    napi_value argv[4], global;
+    napi_value argv[4], global, js_null;
     napi_get_global(env, &global);
+    napi_get_null(env, &js_null); // Cache null once
 
     if (event_data->is_error) {
       napi_value err_code, err_msg;
-      napi_create_string_utf8(env, "MLX_STREAM_ERR", NAPI_AUTO_LENGTH, &err_code);
-      napi_create_string_utf8(env, event_data->payload ? event_data->payload : "Unknown stream error", NAPI_AUTO_LENGTH, &err_msg);
+      napi_create_string_utf8(env, "MLX_STREAM_ERR", 14, &err_code);
+
+      if (event_data->payload != NULL) {
+        napi_create_string_utf8(env, event_data->payload, event_data->payload_len, &err_msg);
+      } else {
+        napi_create_string_utf8(env, "Unknown stream error", 20, &err_msg);
+      }
+
       napi_create_error(env, err_code, err_msg, &argv[0]);
-      napi_get_null(env, &argv[1]);
+      argv[1] = js_null;
       napi_get_boolean(env, true, &argv[2]);
-      napi_get_null(env, &argv[3]);
+      argv[3] = js_null;
     } else {
-      napi_get_null(env, &argv[0]); // No Error
+      argv[0] = js_null;
 
       if (event_data->token_count > 0 && event_data->tokens != NULL) {
         void* array_data;
@@ -136,23 +146,23 @@ static void EmitStreamEventOnMainThread(napi_env env, napi_value js_callback, vo
         memcpy(array_data, event_data->tokens, event_data->token_count * sizeof(int32_t));
         napi_create_typedarray(env, napi_int32_array, event_data->token_count, arraybuffer, 0, &argv[1]);
       } else {
-        napi_get_null(env, &argv[1]); // No Tokens
+        argv[1] = js_null;
       }
 
       napi_get_boolean(env, event_data->is_done, &argv[2]);
 
       if (event_data->payload != NULL) {
-        napi_create_string_utf8(env, event_data->payload, NAPI_AUTO_LENGTH, &argv[3]);
+        // Use pre-computed length instead of NAPI_AUTO_LENGTH
+        napi_create_string_utf8(env, event_data->payload, event_data->payload_len, &argv[3]);
       } else {
-        napi_get_null(env, &argv[3]); // No Payload/Stats
+        argv[3] = js_null;
       }
     }
 
     napi_call_function(env, global, js_callback, 4, argv, NULL);
   }
 
-  if (event_data->tokens) free(event_data->tokens);
-  if (event_data->payload) free(event_data->payload);
+  // A SINGLE FREE! Both tokens and payload exist inside this one memory block.
   free(event_data);
 }
 
@@ -160,22 +170,41 @@ static void EmitStreamEventOnMainThread(napi_env env, napi_value js_callback, vo
 static void OnStreamEventReceived(void *context, const int32_t *tokens, int32_t count, bool is_done, bool is_error, const char *payload) {
   GenerationStreamContext *stream_ctx = (GenerationStreamContext *)context;
 
-  StreamEventData *event_data = malloc(sizeof(StreamEventData));
+  // Calculate memory footprints
+  size_t struct_size = sizeof(StreamEventData);
+  size_t tokens_size = count > 0 ? count * sizeof(int32_t) : 0;
+  size_t payload_len = payload ? strlen(payload) : 0;
+  size_t payload_bytes = payload ? payload_len + 1 : 0;
+
+  // Single Contiguous Memory Allocation (Arena block)
+  // Guarantees cache-locality and eliminates fragmentation
+  void *ptr = malloc(struct_size + tokens_size + payload_bytes);
+  if (!ptr) return; // Fail safe on OOM
+
+  StreamEventData *event_data = (StreamEventData *)ptr;
   event_data->token_count = count;
   event_data->is_done = is_done;
   event_data->is_error = is_error;
-  event_data->payload = payload ? strdup(payload) : NULL;
+  event_data->payload_len = payload_len;
 
-  if (count > 0 && tokens != NULL) {
-    event_data->tokens = malloc(count * sizeof(int32_t));
-    memcpy(event_data->tokens, tokens, count * sizeof(int32_t));
+  // Pointer arithmetic to slice up the contiguous block cleanly
+  if (tokens_size > 0 && tokens != NULL) {
+    event_data->tokens = (int32_t *)((char *)ptr + struct_size);
+    memcpy(event_data->tokens, tokens, tokens_size);
   } else {
     event_data->tokens = NULL;
   }
 
+  if (payload_bytes > 0) {
+    event_data->payload = (char *)ptr + struct_size + tokens_size;
+    memcpy((void *)event_data->payload, payload, payload_bytes);
+  } else {
+    event_data->payload = NULL;
+  }
+
+  // Dispatch to V8 Main Thread
   if (napi_call_threadsafe_function(stream_ctx->threadsafe_fn, event_data, napi_tsfn_nonblocking) != napi_ok) {
-    if (event_data->tokens) free(event_data->tokens);
-    if (event_data->payload) free(event_data->payload);
+    // Only 1 free required here as well
     free(event_data);
   }
 
