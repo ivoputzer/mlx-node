@@ -73,14 +73,14 @@ describe('LLM Module', () => {
       })
 
       const chunks = []
-      const iterator = stream(42, 'prompt', { streamChunkSize: 5 }, { generateStream: mockGenerateStream })
+      const iterator = stream(42, 'prompt', { chunkSize: 5 }, { generateStream: mockGenerateStream })
 
       for await (const chunk of iterator) {
         chunks.push(chunk)
       }
 
       assert.deepStrictEqual(chunks, ['chunk 1 ', 'chunk 2'])
-      assert.strictEqual(mockGenerateStream.mock.calls[0].arguments[2], '{"streamChunkSize":5}')
+      assert.strictEqual(mockGenerateStream.mock.calls[0].arguments[2], '{"chunkSize":5}')
     })
 
     it('should drain correctly when callbacks fire synchronously (Fast Emitter / Queue logic)', async () => {
