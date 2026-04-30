@@ -4,7 +4,7 @@ import { evaluate, generate, stream } from '../index.js'
 
 describe('mlx-lm', () => {
   const createMockTarget = (overrides = {}) => ({
-    ready: true,
+    available: true,
     encode: () => ({ ids: [1, 2, 3] }),
     decode: (tokens) => Array.from(tokens).map(t => `[${t}]`).join(''),
     generate: async function * () {
@@ -160,7 +160,7 @@ describe('mlx-lm', () => {
     })
 
     it('should throw an error if the target is not ready', async () => {
-      const target = createMockTarget({ ready: false })
+      const target = createMockTarget({ available: false })
       await rejects(evaluate(target, 'test'), { message: 'Target not loaded or disposed already' })
     })
 

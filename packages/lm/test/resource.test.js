@@ -47,7 +47,7 @@ describe('MLXResource', () => {
   })
 })
 
-class MLXResource { // not sure if just call it MLXRef
+class MLXResource {
   #mlx = mlx
   #ref = null
 

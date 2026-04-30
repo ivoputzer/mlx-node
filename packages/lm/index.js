@@ -10,7 +10,7 @@ import * as jinja from '@huggingface/jinja'
 
 export async function evaluate (target, prompt, options = {}) {
   if (!prompt) throw new Error('Prompt cannot be empty')
-  if (!target.ready) throw new Error('Target not loaded or disposed already')
+  if (!target.available) throw new Error('Target not loaded or disposed already')
 
   const signal = options?.signal ?? new AbortController().signal
   if (signal?.aborted) throw new AbortError()
@@ -39,7 +39,7 @@ export async function evaluate (target, prompt, options = {}) {
 
 export async function generate (target, prompt, options = {}) {
   if (!prompt) throw new Error('Prompt cannot be empty')
-  if (!target.ready) throw new Error('Target not loaded or disposed already')
+  if (!target.available) throw new Error('Target not loaded or disposed already')
 
   const signal = options?.signal ?? new AbortController().signal
   if (signal?.aborted) throw new AbortError()
@@ -77,7 +77,7 @@ export async function generate (target, prompt, options = {}) {
 
 export async function * stream (target, prompt, options = {}) {
   if (!prompt) throw new Error('Prompt cannot be empty')
-  if (!target.ready) throw new Error('Target not loaded or disposed already')
+  if (!target.available) throw new Error('Target not loaded or disposed already')
 
   const signal = options?.signal ?? new AbortController().signal
   if (signal?.aborted) throw new AbortError()
@@ -94,7 +94,6 @@ export async function * stream (target, prompt, options = {}) {
 
     while (true) {
       const { value, done } = await generate.next()
-
       if (done) {
         // flush anything left in the boundary queue
         if (buffer.length > 0) {
@@ -112,12 +111,7 @@ export async function * stream (target, prompt, options = {}) {
       } else {
         tokens.push(value)
         buffer.push(value)
-
-        const text = target.decode(buffer, {
-          skip_special_tokens: options?.skipSpecialTokens ?? true,
-          clean_up_tokenization_spaces: false
-        })
-
+        const text = target.decode(buffer, { skip_special_tokens: options?.skipSpecialTokens ?? true, clean_up_tokenization_spaces: false })
         if (text.endsWith('\uFFFD')) {
           continue // Keep it in the buffer and wait for the next iteration!
         } else {
@@ -195,24 +189,52 @@ export async function loadOptions (path) {
 
 // CLASSES
 
-export class MLXTarget {
-  // todo: Implement shared interface class once we have a second class that needs it
+class MLXResource {
+  #mlx = mlx
+  #ref = null
+
+  constructor (ref) {
+    if (!ref) throw new Error('Native reference is required')
+    this.#ref = ref
+  }
+
+  get ref () {
+    return this.#ref
+  }
+
+  get available () {
+    return this.#ref !== null
+  }
+
+  dispose () {
+    if (!this.#ref) return false
+    const success = this.#mlx.free(this.#ref)
+    this.#ref = null
+    return success
+  }
+
+  [Symbol.dispose] () {
+    this.dispose()
+  }
 }
 
-export class MLXResource {
-  // todo: Implement shared resoruce class once we have a second class that needs it (example: test/resource.test.js)
+export class MLXTarget extends MLXResource {
+  // todo: Implement shared interface evaluate, generate, stream and other top level functions will be using
+}
+
+export class MLXCache extends MLXTarget {
+  // todo: base implementation is not necessairly for chat_template
+}
+
+export class MLXArray extends MLXTarget {
+  // todo:
 }
 
 export class MLXModel extends MLXTarget {
   #mlx = mlx
-  #ref = null
 
   #tokenizer
   #template
-
-  get ready () {
-    return this.#ref !== null
-  }
 
   static async load (path) {
     const tokenizer = await loadTokenizer(path)
@@ -222,9 +244,8 @@ export class MLXModel extends MLXTarget {
   }
 
   constructor (ref, tokenizer, template) {
-    if (!ref) throw new Error('Native reference is required')
-    super()
-    this.#ref = ref
+    super(ref)
+
     this.#tokenizer = tokenizer
     this.#template = template
   }
@@ -244,21 +265,20 @@ export class MLXModel extends MLXTarget {
   }
 
   generate (tokens, options) {
-    return this.#mlx.generate(this.#ref, tokens, options)
-  }
-
-  dispose () {
-    if (!this.#ref) return
-    this.#mlx.free(this.#ref)
-    this.#ref = null
+    return this.#mlx.generate(this.ref, tokens, options)
   }
 
   abort () {
-    if (!this.#ref) return
-    return this.#mlx.abort(this.#ref)
+    if (!this.available) return
+    return this.#mlx.abort(this.ref)
   }
+}
 
-  [Symbol.dispose] () {
-    this.dispose()
-  }
+export class SpeculativeCache extends MLXCache {
+}
+
+export class Session extends MLXCache {
+}
+
+export class SlidingWindowSession extends Session {
 }
