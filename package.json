@@ -7,6 +7,9 @@
     "packages/*",
     "meta/*"
   ],
+  "scripts": {
+    "test": "npm test --workspaces"
+  },
   "devDependencies": {
     "standard": "^17.1.2"
   }
