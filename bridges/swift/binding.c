@@ -33,19 +33,12 @@ typedef struct {
   void (*destructor)(void*);
 } NativeResource;
 
-// State retained while loading a model asynchronously
-typedef struct {
-  napi_env env;
-  napi_deferred deferred;
-  napi_threadsafe_function threadsafe_fn;
-} ModelLoadContext;
-
 // Payload sent from Swift to V8 when a model finishes loading
 typedef struct {
   bool is_success;
   void *native_ptr;
   char *error_message;
-} ModelLoadResult;
+} ModelLoadPayload;
 
 // Payload sent from Swift to V8 for every generation step
 typedef struct {
@@ -87,49 +80,53 @@ static void GC_FinalizeMemoryBlock(napi_env env, void* finalize_data, void* fina
 // DOMAIN: MODEL LOADING
 // ============================================================================
 
-// 2. Executes on V8 Main Thread to resolve the JS Promise
-static void V8_OnModelLoadResolved(napi_env env, napi_value js_callback, void *context, void *data) {
-  (void)js_callback; // We resolve a promise, no callback needed
-  ModelLoadContext *ctx = (ModelLoadContext *)context;
-  ModelLoadResult *result = (ModelLoadResult *)data;
+// 2. Executes on V8 Main Thread to fire the JS callback: callback(err, ref)
+static void V8_OnModelLoadCallback(napi_env env, napi_value js_callback, void *context, void *data) {
+  (void)context;
+  ModelLoadPayload *payload = (ModelLoadPayload *)data;
 
-  if (env != NULL && ctx != NULL) {
-    if (result->is_success) {
+  if (env != NULL && js_callback != NULL) {
+    napi_value argv[2], global, js_null;
+    napi_get_global(env, &global);
+    napi_get_null(env, &js_null);
+
+    if (payload->is_success) {
       NativeResource* resource = malloc(sizeof(NativeResource));
-      resource->native_ptr = result->native_ptr;
-      resource->destructor = bridge_model_free; // Assign Swift destructor
+      resource->native_ptr = payload->native_ptr;
+      resource->destructor = bridge_model_free;
 
       napi_value js_resource;
       napi_create_external(env, resource, GC_FinalizeNativeResource, NULL, &js_resource);
-      napi_resolve_deferred(env, ctx->deferred, js_resource);
+
+      argv[0] = js_null; // err = null
+      argv[1] = js_resource; // ref = object
     } else {
-      napi_value err_code, err_msg, js_error;
-      napi_create_string_utf8(env, "MLX_LOAD_ERR", NAPI_AUTO_LENGTH, &err_code);
-      napi_create_string_utf8(env, result->error_message ? result->error_message : "Unknown error", NAPI_AUTO_LENGTH, &err_msg);
-      napi_create_error(env, err_code, err_msg, &js_error);
-      napi_reject_deferred(env, ctx->deferred, js_error);
+      napi_create_string_utf8(env, payload->error_message ? payload->error_message : "Unknown error", NAPI_AUTO_LENGTH, &argv[0]);
+      argv[1] = js_null;
     }
+
+    napi_call_function(env, global, js_callback, 2, argv, NULL);
   }
 
-  if (result->error_message) free(result->error_message);
-  free(result);
+  if (payload->error_message) free(payload->error_message);
+  free(payload);
 }
 
 // 1. Called by Swift on a background thread when loading finishes
 static void Swift_OnModelLoadCompleted(void *context, bool success, void *native_ptr, const char *error_msg) {
-  ModelLoadContext *ctx = (ModelLoadContext *)context;
+  napi_threadsafe_function tsfn = (napi_threadsafe_function)context;
 
-  ModelLoadResult *result = malloc(sizeof(ModelLoadResult));
-  result->is_success = success;
-  result->native_ptr = native_ptr;
-  result->error_message = error_msg ? strdup(error_msg) : NULL;
+  ModelLoadPayload *payload = malloc(sizeof(ModelLoadPayload));
+  payload->is_success = success;
+  payload->native_ptr = native_ptr;
+  payload->error_message = error_msg ? strdup(error_msg) : NULL;
 
-  if (napi_call_threadsafe_function(ctx->threadsafe_fn, result, napi_tsfn_nonblocking) != napi_ok) {
-    if (result->error_message) free(result->error_message);
-    free(result);
+  if (napi_call_threadsafe_function(tsfn, payload, napi_tsfn_nonblocking) != napi_ok) {
+    if (payload->error_message) free(payload->error_message);
+    free(payload);
   }
 
-  napi_release_threadsafe_function(ctx->threadsafe_fn, napi_tsfn_release);
+  napi_release_threadsafe_function(tsfn, napi_tsfn_release);
 }
 
 // ============================================================================
@@ -236,7 +233,7 @@ napi_value Export_ResourceFree(napi_env env, napi_callback_info info) {
 }
 
 napi_value Export_ModelLoad(napi_env env, napi_callback_info info) {
-  size_t argc = 1; napi_value args[1];
+  size_t argc = 2; napi_value args[2];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 
   size_t path_len;
@@ -244,19 +241,17 @@ napi_value Export_ModelLoad(napi_env env, napi_callback_info info) {
   char* path_string = (char*)malloc(path_len + 1);
   napi_get_value_string_utf8(env, args[0], path_string, path_len + 1, &path_len);
 
-  ModelLoadContext *ctx = malloc(sizeof(ModelLoadContext));
-  ctx->env = env;
-
-  napi_value promise, resource_name;
-  napi_create_promise(env, &ctx->deferred, &promise);
+  napi_value js_callback = args[1];
+  napi_value resource_name;
   napi_create_string_utf8(env, "MLXModelLoad", NAPI_AUTO_LENGTH, &resource_name);
 
-  // GC_FinalizeMemoryBlock ensures `ctx` is freed if V8 kills the threadsafe function
-  napi_create_threadsafe_function(env, NULL, NULL, resource_name, 0, 1, ctx, GC_FinalizeMemoryBlock, ctx, V8_OnModelLoadResolved, &ctx->threadsafe_fn);
+  napi_threadsafe_function tsfn;
+  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, NULL, NULL, V8_OnModelLoadCallback, &tsfn);
 
-  bridge_model_load(path_string, ctx, Swift_OnModelLoadCompleted);
+  bridge_model_load(path_string, (void*)tsfn, Swift_OnModelLoadCompleted);
   free(path_string);
-  return promise;
+
+  napi_value undefined; napi_get_undefined(env, &undefined); return undefined;
 }
 
 napi_value Export_ModelGenerate(napi_env env, napi_callback_info info) {

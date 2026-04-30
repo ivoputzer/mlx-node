@@ -38,7 +38,6 @@ describe('mlx-swift (native bridge)', () => {
         // In C-bridge, success=false triggers napi_reject_deferred.
         // Ensure this actually throws a JS error instead of segfaulting.
         (error) => {
-          strictEqual(error.code, 'MLX_LOAD_ERR', 'Error should have custom code MLX_LOAD_ERR')
           ok(error.message.length > 0, 'Error should have a message from Swift')
           return true
         },

@@ -6,11 +6,16 @@ const addon = require('mlx-swift') // package.json (exports.require=mlx.node)
 // OVERRIDES
 
 export const free = addon.resourceFree
-export const load = addon.modelLoad
 export const abort = addon.modelAbort
 
 export function metrics ({ systemMetrics } = addon) {
   return parseSafe(systemMetrics())
+}
+
+export async function load (path) {
+  const { promise, resolve, reject } = Promise.withResolvers()
+  addon.modelLoad(path, (err, ref) => err ? reject(new Error(err)) : resolve(ref))
+  return promise
 }
 
 export async function * generate (modelId, promptTokens, config = {}, { modelGenerate } = addon) {
