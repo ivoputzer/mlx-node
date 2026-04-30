@@ -72,11 +72,16 @@ struct NullTokenizerLoader: TokenizerLoader {
 }
 
 // --- Global Registries & Locks ---
-private var modelRegistry: [Int32: ModelContext] = [:]
-private var activeTasks: [Int32: Task<Void, Never>] = [:] // Track running generations
-private var nextModelId: Int32 = 1
+private var activeTasks: [UnsafeMutableRawPointer: Task<Void, Never>] = [:]
 private let registryLock = NSLock()
 
+
+private class ModelContainer {
+    let context: ModelContext
+    init(_ context: ModelContext) {
+        self.context = context
+    }
+}
 
 // --- 3. Bridge Logic ---
 
@@ -87,36 +92,43 @@ public func loadMetal() {
 }
 
 @_cdecl("bridge_model_load")
-public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPointer, callback: @convention(c) (UnsafeMutableRawPointer, Bool, Int32, UnsafePointer<CChar>?) -> Void) {
+public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPointer, callback: @convention(c) (UnsafeMutableRawPointer, Bool, UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void) {
     let url = URL(fileURLWithPath: String(cString: path))
     Task {
         do {
             let modelCtx = try await LLMModelFactory.shared.load(from: url, using: NullTokenizerLoader())
-            let id = registryLock.withLock {
-                let currentId = nextModelId
-                nextModelId += 1
-                modelRegistry[currentId] = modelCtx
-                return currentId
-            }
-            callback(context, true, id, nil)
+
+            // WRAP the struct in our class
+            let container = ModelContainer(modelCtx)
+
+            // Now we can use Unmanaged because ModelContainer is a Class
+            let ptr = Unmanaged.passRetained(container).toOpaque()
+
+            callback(context, true, ptr, nil)
         } catch {
-            error.localizedDescription.withCString { callback(context, false, 0, $0) }
+            error.localizedDescription.withCString { callback(context, false, nil, $0) }
         }
     }
 }
 
-@_cdecl("bridge_model_unload")
-public func unloadModel(modelId: Int32) -> Int32 {
-    cancelGenerate(modelId: modelId) // Ensure we stop processing before unloading
-    let removed = registryLock.withLock { modelRegistry.removeValue(forKey: modelId) }
-    return removed != nil ? 1 : 0
+@_cdecl("bridge_model_free")
+public func bridge_model_free(ptr: UnsafeMutableRawPointer) {
+    // Release the Container class
+    Unmanaged<ModelContainer>.fromOpaque(ptr).release()
 }
 
+// @_cdecl("bridge_model_unload")
+// public func unloadModel(modelId: Int32) -> Int32 {
+//     cancelGenerate(modelId: modelId) // Ensure we stop processing before unloading
+//     let removed = registryLock.withLock { modelRegistry.removeValue(forKey: modelId) }
+//     return removed != nil ? 1 : 0
+// }
+
 @_cdecl("bridge_generate_abort")
-public func cancelGenerate(modelId: Int32) {
+public func cancelGenerate(modelPtr: UnsafeMutableRawPointer) {
     registryLock.withLock {
-        activeTasks[modelId]?.cancel()
-        activeTasks.removeValue(forKey: modelId)
+        activeTasks[modelPtr]?.cancel()
+        // activeTasks.removeValue(forKey: modelPtr)
     }
 }
 
@@ -134,8 +146,6 @@ public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
     return strdup(jsonStr)
 }
 
-import Foundation
-
 // Idiomatic, type-safe struct for high-speed JSON serialization
 private struct GenerateStats: Encodable {
     let promptTokens: Int
@@ -149,7 +159,7 @@ private struct GenerateStats: Encodable {
 
 @_cdecl("bridge_generate_stream")
 public func generateStream(
-    modelId: Int32,
+    modelPtr: UnsafeMutableRawPointer,
     promptTokens: UnsafePointer<Int32>,
     promptLength: Int32,
     configJson: UnsafePointer<CChar>,
@@ -163,18 +173,15 @@ public func generateStream(
     let configObj = parseConfig(String(cString: configJson))
     let chunkSize = Int(configObj.chunkSize ?? 5) // Ensure Int for comparisons
 
+    let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
+    let modelCtx = container.context
+
     let task = Task {
         // DEFER: Guarantees cleanup executing immediately before the Task ends,
         // no matter how the Task exits (success, throw, or cancellation).
-        defer {
-            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelId) }
-        }
 
-        guard let modelCtx = registryLock.withLock({ modelRegistry[modelId] }) else {
-            "Error: Model ID not found".withCString { cStr in
-                callback(context, nil, 0, true, true, cStr)
-            }
-            return
+        defer {
+            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelPtr) }
         }
 
         // Pre-allocate buffer to prevent repeated heap allocations
@@ -272,5 +279,5 @@ public func generateStream(
         }
     }
 
-    registryLock.withLock { activeTasks[modelId] = task }
+    registryLock.withLock { activeTasks[modelPtr] = task }
 }
