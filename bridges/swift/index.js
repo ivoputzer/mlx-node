@@ -1,19 +1,19 @@
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const bridge = require('mlx-swift') // package.json (exports.require=mlx.node)
+const addon = require('mlx-swift') // package.json (exports.require=mlx.node)
 
-// API
+// OVERRIDES
 
-export const load = bridge.load
-export const unload = bridge.unload
-export const abort = bridge.abort
+export const load = addon.load
+export const unload = addon.unload
+export const abort = addon.abort
 
-export function metrics ({ metrics } = bridge) {
+export function metrics ({ metrics } = addon) {
   return parseSafe(metrics())
 }
 
-export async function * generate (modelId, promptTokens, config = {}, { stream } = bridge) {
+export async function * generate (modelId, promptTokens, config = {}, { stream } = addon) {
   const queue = []
   let resume = null
 
@@ -42,7 +42,7 @@ export async function * generate (modelId, promptTokens, config = {}, { stream }
   }
 }
 
-export default bridge
+export default { load, unload, abort, metrics, generate } /* low level stream is not exposed */
 
 // HELPERS
 
