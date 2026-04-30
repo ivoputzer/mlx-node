@@ -1,5 +1,8 @@
 {
   "name": "mlx-array",
   "version": "0.0.0-draft.1",
-  "private": false
+  "private": false,
+  "scripts": {
+    "test": "exit 0"
+  }
 }

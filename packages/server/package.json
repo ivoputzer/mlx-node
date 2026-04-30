@@ -1,5 +1,8 @@
 {
   "name": "mlx-server",
   "version": "0.0.0-draft.0",
-  "private": false
+  "private": false,
+  "scripts": {
+    "test": "exit 0"
+  }
 }

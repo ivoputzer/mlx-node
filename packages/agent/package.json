@@ -1,5 +1,11 @@
 {
   "name": "mlx-agent",
   "version": "0.0.0-draft.1",
-  "private": false
+  "private": false,
+  "scripts": {
+    "test": "exit 0"
+  },
+  "dependencies": {
+    "mlx-lm": "*"
+  }
 }
