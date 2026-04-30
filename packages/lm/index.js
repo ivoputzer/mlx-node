@@ -1,18 +1,12 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import * as mlx from 'mlx-node/swift'
+import mlx from 'mlx-node/swift'
+
 import * as tokenizers from '@huggingface/tokenizers'
 import * as jinja from '@huggingface/jinja'
 
-import { text } from 'node:stream/consumers'
-
 // API
-
-const registry = new FinalizationRegistry(({ id, dispose }) => {
-  console.log('FinalizationRegistry', id)
-  if (id) dispose(id)
-})
 
 export async function evaluate (target, prompt, options = {}) {
   if (!prompt) throw new Error('Prompt cannot be empty')
@@ -201,65 +195,38 @@ export async function loadOptions (path) {
 
 // CLASSES
 
-export class Target {
-  #bridge = mlx // this is easier to mock via node:test
-  #ready = true
-  #id = -1
-
-  constructor (id, bridge) {
-    this.#id = id
-    // this.#bridge = bridge
-    // this.#dispose = bridge.unload.bind(bridge, id)
-    // registry.register(this, { id, dispose: this.dispose }, this)
-  }
-
-  get id () {
-    return this.#id
-  }
-
-  get ready () {
-    return this.#ready
-  }
-
-  get bridge () {
-    return this.#bridge
-  }
-
-  dispose () {
-    console.log('Target.dispose', this.#id, this.#ready)
-    if (!this.#ready) return
-    this.#bridge.unload(this.#id)
-    this.#ready = false
-    this.#id = -1
-    // console.log('Target.dispose', this.#id, this.#loaded)
-    // registry.unregister(this)
-  }
-
-  [Symbol.dispose] () {
-    this.dispose()
-  }
+export class MLXTarget {
+  // todo: Implement shared interface class once we have a second class that needs it
 }
 
-export class Model extends Target {
+export class MLXResource {
+  // todo: Implement shared resoruce class once we have a second class that needs it (example: test/resource.test.js)
+}
+
+export class MLXModel extends MLXTarget {
+  #mlx = mlx
+  #ref = null
+
   #tokenizer
   #template
-  #options
-  #bridge
 
-  static async load (path, bridge = mlx) {
-    const tokenizer = await loadTokenizer(path)
-    const template = await loadTemplate(path)
-
-    const id = await bridge.load(path)
-    return new Model(id, bridge, tokenizer, template, { config: {}, generate: {} })
+  get ready () {
+    return this.#ref !== null
   }
 
-  constructor (id, bridge, tokenizer, template, options) {
-    super(id, bridge)
+  static async load (path) {
+    const tokenizer = await loadTokenizer(path)
+    const template = await loadTemplate(path)
+    const ref = await mlx.load(path) // C Pointer
+    return await new MLXModel(ref, tokenizer, template)
+  }
 
+  constructor (ref, tokenizer, template) {
+    if (!ref) throw new Error('Native reference is required')
+    super()
+    this.#ref = ref
     this.#tokenizer = tokenizer
     this.#template = template
-    this.#options = options
   }
 
   encode (prompt, options = {}, { Template } = jinja) {
@@ -277,14 +244,21 @@ export class Model extends Target {
   }
 
   generate (tokens, options) {
-    return this.bridge.generate(this.id, tokens, options)
+    return this.#mlx.generate(this.#ref, tokens, options)
+  }
+
+  dispose () {
+    if (!this.#ref) return
+    this.#mlx.free(this.#ref)
+    this.#ref = null
   }
 
   abort () {
-    console.log('Model.abort id:%s loaded:%s', this.id, this.loaded)
-    if (this.ready) {
-      this.bridge.abort(this.id)
-      console.log('Model.abort', this.bridge.abort(this.id))
-    }
+    if (!this.#ref) return
+    return this.#mlx.abort(this.#ref)
+  }
+
+  [Symbol.dispose] () {
+    this.dispose()
   }
 }
