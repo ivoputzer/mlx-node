@@ -65,7 +65,7 @@ describe('mlx-swift (native bridge)', () => {
         cb(null, null, true, '{"stopReason":"stop"}') // GPU is super fast
       })
 
-      const chunks = generate(1, new Int32Array([99]), { temperature: 0.7 }, { stream: streamMock })
+      const chunks = generate(1, new Int32Array([99]), { temperature: 0.7 }, { modelGenerate: streamMock })
 
       const result1 = await chunks.next()
       strictEqual(result1.value, 1)
@@ -99,7 +99,7 @@ describe('mlx-swift (native bridge)', () => {
         storedCallback = cb // Keep the callback to trigger manually
       })
 
-      const chunks = generate(1, new Int32Array([]), {}, { stream: streamMock })
+      const chunks = generate(1, new Int32Array([]), {}, { modelGenerate: streamMock })
 
       // JS asks for next token before C has provided it. Promise is created internally.
       const promise1 = chunks.next()
@@ -126,7 +126,7 @@ describe('mlx-swift (native bridge)', () => {
         cb(new Error('Metal out of memory'), null, true, null) // GPU outputs one chunk, then crashes
       })
 
-      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { modelGenerate: streamFn })
       const { value, done } = await chunks.next()
 
       strictEqual(value, 10) // Unrolled from array
@@ -140,7 +140,7 @@ describe('mlx-swift (native bridge)', () => {
         cb(null, null, true, '{"broken_json: oops')
       })
 
-      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { modelGenerate: streamFn })
       const { done, value } = await chunks.next()
 
       strictEqual(done, true)
@@ -157,7 +157,7 @@ describe('mlx-swift (native bridge)', () => {
 
       // Launch 50 streams in parallel
       const streams = Array.from({ length: 50 }, async (_, i) => {
-        const chunks = generate(i, new Int32Array([]), '{}', { stream: streamFm })
+        const chunks = generate(i, new Int32Array([]), '{}', { modelGenerate: streamFm })
         const result = await chunks.next() // Get first token
         const stats = await chunks.next() // Get stats (done)
 
@@ -181,7 +181,7 @@ describe('mlx-swift (native bridge)', () => {
         storedCallback = cb
       })
 
-      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { modelGenerate: streamFn })
 
       // 1. Ask for the first token (JS is now awaiting)
       const firstPromise = chunks.next()
@@ -214,7 +214,7 @@ describe('mlx-swift (native bridge)', () => {
         storedCallback = cb
       })
 
-      const chunks = generate(1, new Int32Array([]), '{}', { stream: streamFn })
+      const chunks = generate(1, new Int32Array([]), '{}', { modelGenerate: streamFn })
 
       // 1. PRIME THE GENERATOR
       const firstRequest = chunks.next()

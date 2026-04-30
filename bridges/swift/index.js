@@ -5,19 +5,19 @@ const addon = require('mlx-swift') // package.json (exports.require=mlx.node)
 
 // OVERRIDES
 
-export const load = addon.load
-export const free = addon.free
-export const abort = addon.abort
+export const free = addon.resourceFree
+export const load = addon.modelLoad
+export const abort = addon.modelAbort
 
-export function metrics ({ metrics } = addon) {
-  return parseSafe(metrics())
+export function metrics ({ systemMetrics } = addon) {
+  return parseSafe(systemMetrics())
 }
 
-export async function * generate (modelId, promptTokens, config = {}, { stream } = addon) {
+export async function * generate (modelId, promptTokens, config = {}, { modelGenerate } = addon) {
   const queue = []
   let resume = null
 
-  stream(modelId, promptTokens, configFrom(config), (error, tokens, done, json) => {
+  modelGenerate(modelId, promptTokens, configFrom(config), (error, tokens, done, json) => {
     queue.push({ error, tokens, done, json })
     if (resume) {
       resume()
