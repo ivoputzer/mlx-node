@@ -33,11 +33,6 @@ typedef struct {
 } ModelLoadContext;
 
 typedef struct {
-  napi_env env;
-  napi_threadsafe_function threadsafe_fn;
-} GenerationStreamContext;
-
-typedef struct {
   bool is_success;
   void *model_ptr;
   char *error_message;
@@ -70,10 +65,6 @@ static void FinalizeResource(napi_env env, void* finalize_data, void* finalize_h
 }
 
 static void FinalizeModelLoadContext(napi_env env, void* finalize_data, void* finalize_hint) {
-  if (finalize_data != NULL) free(finalize_data);
-}
-
-static void FinalizeGenerationStreamContext(napi_env env, void* finalize_data, void* finalize_hint) {
   if (finalize_data != NULL) free(finalize_data);
 }
 
@@ -127,6 +118,7 @@ static void OnModelLoadCompleted(void *context, bool success, void *model_ptr, c
 // TEXT GENERATION STREAM PIPELINE
 // ============================================================================
 
+// Main Thread Emitter (Fixme: `void *context` isn't used anymore)
 static void EmitStreamEventOnMainThread(napi_env env, napi_value js_callback, void *context, void *data) {
   StreamEventData *event_data = (StreamEventData *)data;
 
@@ -167,7 +159,8 @@ static void EmitStreamEventOnMainThread(napi_env env, napi_value js_callback, vo
 }
 
 static void OnStreamEventReceived(void *context, const int32_t *tokens, int32_t count, bool is_done, bool is_error, const char *payload) {
-  GenerationStreamContext *stream_ctx = (GenerationStreamContext *)context;
+  napi_threadsafe_function tsfn = (napi_threadsafe_function)context; // <-- MAGIC
+
   size_t struct_size = sizeof(StreamEventData);
   size_t tokens_size = count > 0 ? count * sizeof(int32_t) : 0;
   size_t payload_len = payload ? strlen(payload) : 0;
@@ -196,12 +189,13 @@ static void OnStreamEventReceived(void *context, const int32_t *tokens, int32_t 
     event_data->payload = NULL;
   }
 
-  if (napi_call_threadsafe_function(stream_ctx->threadsafe_fn, event_data, napi_tsfn_nonblocking) != napi_ok) {
+  // Pass tsfn directly. If V8 has torn down, this safely returns != napi_ok
+  if (napi_call_threadsafe_function(tsfn, event_data, napi_tsfn_nonblocking) != napi_ok) {
     free(event_data);
   }
 
   if (is_done) {
-    napi_release_threadsafe_function(stream_ctx->threadsafe_fn, napi_tsfn_release);
+    napi_release_threadsafe_function(tsfn, napi_tsfn_release);
   }
 }
 
@@ -301,14 +295,15 @@ napi_value Export_GenerateStream(napi_env env, napi_callback_info info) {
 
   napi_value js_callback = args[3];
 
-  GenerationStreamContext *stream_ctx = malloc(sizeof(GenerationStreamContext));
-  stream_ctx->env = env;
-
   napi_value resource_name;
   napi_create_string_utf8(env, "MLXStreamGeneration", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, stream_ctx, FinalizeGenerationStreamContext, stream_ctx, EmitStreamEventOnMainThread, &stream_ctx->threadsafe_fn);
 
-  bridge_generate_stream(handle->swift_ptr, prompt_tokens, (int32_t)length, config_json, stream_ctx, OnStreamEventReceived);
+  // We don't need a struct context anymore, just pass NULLs
+  napi_threadsafe_function tsfn;
+  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, NULL, NULL, EmitStreamEventOnMainThread, &tsfn);
+
+  // Pass tsfn natively to Swift!
+  bridge_generate_stream(handle->swift_ptr, prompt_tokens, (int32_t)length, config_json, (void*)tsfn, OnStreamEventReceived);
 
   free(config_json);
   napi_value undefined; napi_get_undefined(env, &undefined); return undefined;

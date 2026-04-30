@@ -174,9 +174,9 @@ public func generateStream(
     let chunkSize = Int(configObj.chunkSize ?? 5) // Ensure Int for comparisons
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
-    let modelCtx = container.context
 
-    let task = Task {
+   let task = Task { [container] in
+        let modelCtx = container.context
         // DEFER: Guarantees cleanup executing immediately before the Task ends,
         // no matter how the Task exits (success, throw, or cancellation).
 
