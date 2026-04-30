@@ -1,16 +1,16 @@
 import { it, describe } from 'node:test'
-import { ok, equal, rejects, deepEqual, strictEqual, doesNotThrow } from 'node:assert/strict'
+import { ok, rejects, strictEqual, doesNotThrow } from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import mlx, { metrics, load, unload, abort, generate } from 'mlx-swift'
+import mlx, { metrics, load, free, abort, generate } from 'mlx-swift'
 
 describe('mlx-swift (native bridge)', () => {
   it('Exports all expected properties', () => {
     ok(mlx, 'Module should exist')
     strictEqual(typeof metrics, 'function', 'metrics should be exported')
     strictEqual(typeof load, 'function', 'load should be exported')
-    strictEqual(typeof unload, 'function', 'unload should be exported')
+    strictEqual(typeof free, 'function', 'free should be exported')
     strictEqual(typeof generate, 'function', 'generate should be exported')
     strictEqual(typeof abort, 'function', 'abort should be exported')
   })
@@ -18,7 +18,7 @@ describe('mlx-swift (native bridge)', () => {
   it('Named exports and default have same function reference', () => {
     strictEqual(metrics, mlx.metrics, 'metrics should be exported')
     strictEqual(load, mlx.load, 'load should be exported')
-    strictEqual(unload, mlx.unload, 'unload should be exported')
+    strictEqual(free, mlx.free, 'free should be exported')
     strictEqual(generate, mlx.generate, 'generate should be exported')
     strictEqual(abort, mlx.abort, 'abort should be exported')
   })
@@ -47,10 +47,10 @@ describe('mlx-swift (native bridge)', () => {
     })
   })
 
-  describe('.unload', () => {
+  describe('.free', () => {
     it('Returns false for non-existent model IDs', () => {
-      const result = unload(99999)
-      strictEqual(result, false, 'Unloading invalid model ID should return false')
+      const result = free(99999)
+      strictEqual(result, false, 'freeing invalid model ID should return false')
     })
   })
 

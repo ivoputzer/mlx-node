@@ -6,7 +6,7 @@ const addon = require('mlx-swift') // package.json (exports.require=mlx.node)
 // OVERRIDES
 
 export const load = addon.load
-export const unload = addon.unload
+export const free = addon.free
 export const abort = addon.abort
 
 export function metrics ({ metrics } = addon) {
@@ -42,7 +42,7 @@ export async function * generate (modelId, promptTokens, config = {}, { stream }
   }
 }
 
-export default { load, unload, abort, metrics, generate } /* low level stream is not exposed */
+export default { load, free, abort, metrics, generate } /* low level stream is not exposed */
 
 // HELPERS
 
