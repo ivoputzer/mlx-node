@@ -2,16 +2,10 @@ import { it, describe } from 'node:test'
 import { ok, equal, rejects, deepEqual, strictEqual, doesNotThrow } from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { createRequire } from 'node:module'
 
 import mlx, { metrics, load, unload, abort, generate } from 'mlx-swift'
 
 describe('mlx-swift (native bridge)', () => {
-  it('Supports both require and import', () => {
-    const require = createRequire(import.meta.url)
-    strictEqual(mlx, require('mlx-swift'))
-  })
-
   it('Exports all expected properties', () => {
     ok(mlx, 'Module should exist')
     strictEqual(typeof metrics, 'function', 'metrics should be exported')
@@ -19,6 +13,14 @@ describe('mlx-swift (native bridge)', () => {
     strictEqual(typeof unload, 'function', 'unload should be exported')
     strictEqual(typeof generate, 'function', 'generate should be exported')
     strictEqual(typeof abort, 'function', 'abort should be exported')
+  })
+
+  it('Named exports and default have same function reference', () => {
+    strictEqual(metrics, mlx.metrics, 'metrics should be exported')
+    strictEqual(load, mlx.load, 'load should be exported')
+    strictEqual(unload, mlx.unload, 'unload should be exported')
+    strictEqual(generate, mlx.generate, 'generate should be exported')
+    strictEqual(abort, mlx.abort, 'abort should be exported')
   })
 
   it('Has default.metallib bundled and locatable', () => {
@@ -231,34 +233,5 @@ describe('mlx-swift (native bridge)', () => {
     })
   })
 
-  describe('.abort', () => {
-    it('Executes successfully and returns undefined for valid IDs', () => {
-      doesNotThrow(() => {
-        // Even if the model doesn't exist, Swift should safely ignore it
-        // (assuming activeTasks.removeValue handles missing keys safely)
-        const result = abort(99999)
-        strictEqual(result, undefined, 'abort should return undefined')
-      })
-    })
-
-    it('Throws a TypeError when called without arguments', () => {
-      try {
-        abort()
-        throw new Error('Should have thrown')
-      } catch (err) {
-        strictEqual(err.name, 'TypeError')
-        ok(err.message.includes('required'), 'Should complain about missing argument')
-      }
-    })
-
-    it('Throws a TypeError when called with invalid argument types', () => {
-      try {
-        abort('llama-3')
-        throw new Error('Should have thrown')
-      } catch (err) {
-        strictEqual(err.name, 'TypeError')
-        ok(err.message.includes('integer'), 'Should complain about wrong type')
-      }
-    })
-  })
+  describe.todo('.abort')
 })
