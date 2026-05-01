@@ -13,15 +13,29 @@
 // ============================================================================
 
 extern void bridge_metal_load(void);
-extern char* bridge_metrics(void);
+extern void bridge_metal_clear_cache(void);
+extern char* bridge_metal_metrics(void);
 
-// Model API
 extern void bridge_model_load(const char *path, void *context, void (*callback)(void *, bool, void *, const char *));
 extern void bridge_model_free(void *ptr);
 
-// Generation API
-extern void bridge_generate_stream(void *model_ptr, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
-extern void bridge_generate_abort(void *model_ptr);
+extern void* bridge_cache_create(void* model_ptr, const char* config_json);
+extern void bridge_cache_free(void* ptr);
+extern void* bridge_cache_clone(void* ptr);
+extern bool bridge_cache_save(void* ptr, const char* path);
+extern void* bridge_cache_load(const char* path);
+extern int32_t bridge_cache_trim(void* ptr, int32_t num_tokens);
+
+// bridge_generate_stream -> bridge_model_generate_task
+// bridge_model_evaluate -> bridge_model_evaluate_task
+
+// bridge_stream_abort -> bridge_model_abort_task
+// bridge_stream_free -> bridge_model_free_task
+
+extern void* bridge_generate_stream(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void*, const int32_t*, int32_t, bool, bool, const char*));
+extern void bridge_stream_abort(void* ptr);
+extern void bridge_stream_free(void* ptr);
+
 
 // ============================================================================
 // TYPE DEFINITIONS (DATA STRUCTURES)
@@ -101,7 +115,11 @@ static void V8_OnModelLoadCallback(napi_env env, napi_value js_callback, void *c
       argv[0] = js_null; // err = null
       argv[1] = js_resource; // ref = object
     } else {
-      napi_create_string_utf8(env, payload->error_message ? payload->error_message : "Unknown error", NAPI_AUTO_LENGTH, &argv[0]);
+      napi_value err_code, err_msg;
+      napi_create_string_utf8(env, "MLX_LOAD_ERR", NAPI_AUTO_LENGTH, &err_code);
+      const char* error_str = payload->error_message ? payload->error_message : "Error loading model";
+      napi_create_string_utf8(env, error_str, NAPI_AUTO_LENGTH, &err_msg);
+      napi_create_error(env, err_code, err_msg, &argv[0]);
       argv[1] = js_null;
     }
 
@@ -254,35 +272,155 @@ napi_value Export_ModelLoad(napi_env env, napi_callback_info info) {
   napi_value undefined; napi_get_undefined(env, &undefined); return undefined;
 }
 
-napi_value Export_ModelGenerate(napi_env env, napi_callback_info info) {
-  size_t argc = 4; napi_value args[4];
+napi_value Export_CacheCreate(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* model_res;
+  napi_get_value_external(env, args[0], (void**)&model_res);
+
+  size_t json_len;
+  napi_get_value_string_utf8(env, args[1], NULL, 0, &json_len);
+  char* config_json = (char*)malloc(json_len + 1);
+  napi_get_value_string_utf8(env, args[1], config_json, json_len + 1, &json_len);
+
+  void* cache_ptr = bridge_cache_create(model_res->native_ptr, config_json);
+  free(config_json);
+
+  NativeResource* resource = malloc(sizeof(NativeResource));
+  resource->native_ptr = cache_ptr;
+  resource->destructor = bridge_cache_free;
+
+  napi_value js_resource;
+  napi_create_external(env, resource, GC_FinalizeNativeResource, NULL, &js_resource);
+  return js_resource;
+}
+
+napi_value Export_CacheClone(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* orig_res;
+  if (napi_get_value_external(env, args[0], (void**)&orig_res) != napi_ok || !orig_res || !orig_res->native_ptr) {
+    napi_throw_type_error(env, "MLX_ERR", "Invalid cache pointer"); return NULL;
+  }
+
+  void* cloned_ptr = bridge_cache_clone(orig_res->native_ptr);
+  NativeResource* new_res = malloc(sizeof(NativeResource));
+  new_res->native_ptr = cloned_ptr;
+  new_res->destructor = bridge_cache_free;
+
+  napi_value js_resource;
+  napi_create_external(env, new_res, GC_FinalizeNativeResource, NULL, &js_resource);
+  return js_resource;
+}
+
+napi_value Export_CacheSave(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* cache_res;
+  napi_get_value_external(env, args[0], (void**)&cache_res);
+
+  size_t path_len;
+  napi_get_value_string_utf8(env, args[1], NULL, 0, &path_len);
+  char* path_string = (char*)malloc(path_len + 1);
+  napi_get_value_string_utf8(env, args[1], path_string, path_len + 1, &path_len);
+
+  bool success = bridge_cache_save(cache_res->native_ptr, path_string);
+  free(path_string);
+
+  napi_value js_result; napi_get_boolean(env, success, &js_result);
+  return js_result;
+}
+
+napi_value Export_CacheLoad(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  size_t path_len;
+  napi_get_value_string_utf8(env, args[0], NULL, 0, &path_len);
+  char* path_string = (char*)malloc(path_len + 1);
+  napi_get_value_string_utf8(env, args[0], path_string, path_len + 1, &path_len);
+
+  void* cache_ptr = bridge_cache_load(path_string);
+  free(path_string);
+
+  if (!cache_ptr) {
+    napi_throw_error(env, "MLX_ERR", "Failed to load cache from disk");
+    return NULL;
+  }
+
+  NativeResource* new_res = malloc(sizeof(NativeResource));
+  new_res->native_ptr = cache_ptr;
+  new_res->destructor = bridge_cache_free;
+
+  napi_value js_resource;
+  napi_create_external(env, new_res, GC_FinalizeNativeResource, NULL, &js_resource);
+  return js_resource;
+}
+
+napi_value Export_CacheTrim(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value args[2];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 
   NativeResource* resource;
-  if (napi_get_value_external(env, args[0], (void**)&resource) != napi_ok || resource == NULL || resource->native_ptr == NULL) {
+  napi_get_value_external(env, args[0], (void**)&resource);
+
+  int32_t num_tokens;
+  napi_get_value_int32(env, args[1], &num_tokens);
+
+  int32_t actual_trimmed = bridge_cache_trim(resource->native_ptr, num_tokens);
+
+  napi_value result;
+  napi_create_int32(env, actual_trimmed, &result);
+  return result;
+}
+
+napi_value Export_ModelGenerate(napi_env env, napi_callback_info info) {
+  size_t argc = 5; napi_value args[5]; // model, cache, tokens, json, callback
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* model_res;
+  if (napi_get_value_external(env, args[0], (void**)&model_res) != napi_ok || !model_res || !model_res->native_ptr) {
     napi_throw_type_error(env, "MLX_ERR", "Model is already unloaded or invalid"); return NULL;
   }
 
+  void* cache_ptr = NULL;
+  napi_valuetype cache_type;
+  napi_typeof(env, args[1], &cache_type);
+  if (cache_type == napi_external) {
+    NativeResource* cache_res;
+    napi_get_value_external(env, args[1], (void**)&cache_res);
+    if (cache_res) cache_ptr = cache_res->native_ptr;
+  }
+
   napi_typedarray_type type; size_t length; void* data; size_t byte_offset;
-  napi_get_typedarray_info(env, args[1], &type, &length, &data, NULL, &byte_offset);
+  napi_get_typedarray_info(env, args[2], &type, &length, &data, NULL, &byte_offset);
   int32_t* prompt_tokens = (int32_t*)((char*)data + byte_offset);
 
   size_t json_len;
-  napi_get_value_string_utf8(env, args[2], NULL, 0, &json_len);
+  napi_get_value_string_utf8(env, args[3], NULL, 0, &json_len);
   char* config_json = (char*)malloc(json_len + 1);
-  napi_get_value_string_utf8(env, args[2], config_json, json_len + 1, &json_len);
+  napi_get_value_string_utf8(env, args[3], config_json, json_len + 1, &json_len);
 
-  napi_value js_callback = args[3];
+  napi_value js_callback = args[4];
   napi_value resource_name;
   napi_create_string_utf8(env, "MLXModelStream", NAPI_AUTO_LENGTH, &resource_name);
 
   napi_threadsafe_function tsfn;
   napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, NULL, NULL, V8_OnStreamEvent, &tsfn);
 
-  bridge_generate_stream(resource->native_ptr, prompt_tokens, (int32_t)length, config_json, (void*)tsfn, Swift_OnStreamEvent);
-
+  void* stream_ptr = bridge_generate_stream(model_res->native_ptr, cache_ptr, prompt_tokens, (int32_t)length, config_json, (void*)tsfn, Swift_OnStreamEvent);
   free(config_json);
-  napi_value undefined; napi_get_undefined(env, &undefined); return undefined;
+
+  NativeResource* stream_res = malloc(sizeof(NativeResource));
+  stream_res->native_ptr = stream_ptr;
+  stream_res->destructor = bridge_stream_free;
+
+  napi_value js_stream_res;
+  napi_create_external(env, stream_res, GC_FinalizeNativeResource, NULL, &js_stream_res);
+  return js_stream_res;
 }
 
 napi_value Export_ModelAbort(napi_env env, napi_callback_info info) {
@@ -295,15 +433,26 @@ napi_value Export_ModelAbort(napi_env env, napi_callback_info info) {
   }
 
   if (resource != NULL && resource->native_ptr != NULL) {
-    bridge_generate_abort(resource->native_ptr);
+    bridge_stream_abort(resource->native_ptr);
   }
 
   napi_value undefined; napi_get_undefined(env, &undefined); return undefined;
 }
 
+napi_value Export_StreamAbort(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* resource;
+  if (napi_get_value_external(env, args[0], (void**)&resource) == napi_ok && resource && resource->native_ptr) {
+    bridge_stream_abort(resource->native_ptr);
+  }
+  napi_value undefined; napi_get_undefined(env, &undefined); return undefined;
+}
+
 napi_value Export_SystemMetrics(napi_env env, napi_callback_info info) {
   (void)info; // Silence unused warning
-  char *json_str = bridge_metrics();
+  char *json_str = bridge_metal_metrics();
   napi_value result;
   if (json_str == NULL) {
     napi_create_string_utf8(env, "{}", NAPI_AUTO_LENGTH, &result);
@@ -312,6 +461,12 @@ napi_value Export_SystemMetrics(napi_env env, napi_callback_info info) {
     free(json_str);
   }
   return result;
+}
+
+napi_value Export_SystemClearCache(napi_env env, napi_callback_info info) {
+  bridge_metal_clear_cache();
+  napi_value undefined; napi_get_undefined(env, &undefined);
+  return undefined;
 }
 
 // ============================================================================
@@ -334,13 +489,22 @@ napi_value init(napi_env env, napi_value exports) {
   // Explicit mappings. JS wrapper handles mapping these to nice object methods.
   napi_property_descriptor desc[] = {
       {"resourceFree", NULL, Export_ResourceFree, NULL, NULL, NULL, napi_default, NULL},
+
+      {"cacheCreate", NULL, Export_CacheCreate, NULL, NULL, NULL, napi_default, NULL},
+      {"cacheLoad", NULL, Export_CacheLoad, NULL, NULL, NULL, napi_default, NULL},
+      {"cacheSave", NULL, Export_CacheSave, NULL, NULL, NULL, napi_default, NULL},
+      {"cacheClone", NULL, Export_CacheClone, NULL, NULL, NULL, napi_default, NULL},
+      {"cacheTrim", NULL, Export_CacheTrim, NULL, NULL, NULL, napi_default, NULL},
+
       {"modelLoad", NULL, Export_ModelLoad, NULL, NULL, NULL, napi_default, NULL},
       {"modelGenerate", NULL, Export_ModelGenerate, NULL, NULL, NULL, napi_default, NULL},
-      {"modelAbort", NULL, Export_ModelAbort, NULL, NULL, NULL, napi_default, NULL},
-      {"systemMetrics", NULL, Export_SystemMetrics, NULL, NULL, NULL, napi_default, NULL}
+      {"streamAbort", NULL, Export_StreamAbort, NULL, NULL, NULL, napi_default, NULL},
+
+      {"systemMetrics", NULL, Export_SystemMetrics, NULL, NULL, NULL, napi_default, NULL},
+      {"systemClearCache", NULL, Export_SystemClearCache, NULL, NULL, NULL, napi_default, NULL},
   };
 
-  napi_define_properties(env, exports, 5, desc);
+  napi_define_properties(env, exports, 11, desc);
   return exports;
 }
 

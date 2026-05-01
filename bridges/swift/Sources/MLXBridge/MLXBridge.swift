@@ -71,15 +71,23 @@ struct NullTokenizerLoader: TokenizerLoader {
     }
 }
 
-// --- Global Registries & Locks ---
-private var activeTasks: [UnsafeMutableRawPointer: Task<Void, Never>] = [:]
-private let registryLock = NSLock()
-
-
+// --- Native Containers ---
 private class ModelContainer {
     let context: ModelContext
-    init(_ context: ModelContext) {
-        self.context = context
+    init(_ context: ModelContext) { self.context = context }
+}
+
+private class CacheContainer {
+    var caches: [KVCache]
+    init(_ caches: [KVCache]) { self.caches = caches }
+}
+
+private class TaskContainer {
+    var task: Task<Void, Never>?
+    init() {}
+    deinit {
+        // Ultimate safety: If V8 GCs the stream handle before it finishes, we kill the work.
+        task?.cancel()
     }
 }
 
@@ -91,19 +99,21 @@ public func loadMetal() {
     eval(a + a)
 }
 
+@_cdecl("bridge_metal_clear_cache")
+public func bridge_metal_clear_cache() {
+    // This tells the MLX GPU backend to release all unused buffers back to macOS
+    // MLX.GPU.clearCache() @deprected
+    Memory.clearCache()
+}
+
 @_cdecl("bridge_model_load")
 public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPointer, callback: @convention(c) (UnsafeMutableRawPointer, Bool, UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void) {
     let url = URL(fileURLWithPath: String(cString: path))
     Task {
         do {
             let modelCtx = try await LLMModelFactory.shared.load(from: url, using: NullTokenizerLoader())
-
-            // WRAP the struct in our class
             let container = ModelContainer(modelCtx)
-
-            // Now we can use Unmanaged because ModelContainer is a Class
             let ptr = Unmanaged.passRetained(container).toOpaque()
-
             callback(context, true, ptr, nil)
         } catch {
             error.localizedDescription.withCString { callback(context, false, nil, $0) }
@@ -113,40 +123,101 @@ public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPoint
 
 @_cdecl("bridge_model_free")
 public func bridge_model_free(ptr: UnsafeMutableRawPointer) {
-    // Release the Container class
     Unmanaged<ModelContainer>.fromOpaque(ptr).release()
 }
 
-// @_cdecl("bridge_model_unload")
-// public func unloadModel(modelId: Int32) -> Int32 {
-//     cancelGenerate(modelId: modelId) // Ensure we stop processing before unloading
-//     let removed = registryLock.withLock { modelRegistry.removeValue(forKey: modelId) }
-//     return removed != nil ? 1 : 0
-// }
+// --- Cache API ---
 
-@_cdecl("bridge_generate_abort")
-public func cancelGenerate(modelPtr: UnsafeMutableRawPointer) {
-    registryLock.withLock {
-        activeTasks[modelPtr]?.cancel()
-        // activeTasks.removeValue(forKey: modelPtr)
+@_cdecl("bridge_cache_create")
+public func bridge_cache_create(modelPtr: UnsafeMutableRawPointer, configJson: UnsafePointer<CChar>) -> UnsafeMutableRawPointer {
+    let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
+    let configObj = parseConfig(String(cString: configJson))
+    let caches = container.context.model.newCache(parameters: configObj.toGenerateParameters())
+    let cacheContainer = CacheContainer(caches)
+    return Unmanaged.passRetained(cacheContainer).toOpaque()
+}
+
+@_cdecl("bridge_cache_free")
+public func bridge_cache_free(ptr: UnsafeMutableRawPointer) {
+    Unmanaged<CacheContainer>.fromOpaque(ptr).release()
+}
+
+@_cdecl("bridge_cache_clone")
+public func bridge_cache_clone(ptr: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
+    let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+    // KVCache.copy() creates a deep, independent copy of the KV arrays in VRAM
+    let clonedCaches = container.caches.map { $0.copy() }
+    let newContainer = CacheContainer(clonedCaches)
+    return Unmanaged.passRetained(newContainer).toOpaque()
+}
+
+@_cdecl("bridge_cache_save")
+public func bridge_cache_save(
+    ptr: UnsafeMutableRawPointer,
+    path: UnsafePointer<CChar>,
+    context: UnsafeMutableRawPointer,
+    callback: @convention(c) (UnsafeMutableRawPointer, Bool) -> Void
+) {
+    let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+    let url = URL(fileURLWithPath: String(cString: path))
+
+    Task {
+        do {
+            try MLXLMCommon.savePromptCache(url: url, cache: container.caches)
+            callback(context, true)
+        } catch {
+            callback(context, false)
+        }
     }
 }
 
-// Metrics (Synchronous)
-@_cdecl("bridge_metrics")
-public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
+@_cdecl("bridge_cache_load")
+public func bridge_cache_load(
+    path: UnsafePointer<CChar>,
+    context: UnsafeMutableRawPointer,
+    callback: @convention(c) (UnsafeMutableRawPointer, UnsafeMutableRawPointer?) -> Void
+) {
+    let url = URL(fileURLWithPath: String(cString: path))
 
-    let snapshot = Memory.snapshot() // returns a Codable struct containing activeMemory, peakMemory, and cacheMemory
-
-    guard let jsonData = try? JSONEncoder().encode(snapshot),
-          let jsonStr = String(data: jsonData, encoding: .utf8) else {
-        return nil
+    Task {
+        do {
+            let (caches, _) = try MLXLMCommon.loadPromptCache(url: url)
+            let container = CacheContainer(caches)
+            let ptr = Unmanaged.passRetained(container).toOpaque()
+            callback(context, ptr)
+        } catch {
+            callback(context, nil)
+        }
     }
+}
 
+
+@_cdecl("bridge_cache_trim")
+public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int) -> Int {
+    let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+    // Trims N tokens from the end of all caches in the container
+    return MLXLMCommon.trimPromptCache(container.caches, numTokens: numTokens)
+}
+
+// --- Metrics ---
+private struct BridgeMetrics: Encodable {
+    let active: Int
+    let cache: Int
+    let peak: Int
+    let memoryLimit: Int
+    let cacheLimit: Int
+}
+
+@_cdecl("bridge_metal_metrics")
+public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
+    let snapshot = Memory.snapshot()
+    let metrics = BridgeMetrics(active: snapshot.activeMemory,cache: snapshot.cacheMemory,peak: snapshot.peakMemory,memoryLimit: Memory.memoryLimit, cacheLimit: Memory.cacheLimit)
+
+    guard let jsonData = try? JSONEncoder().encode(metrics),
+          let jsonStr = String(data: jsonData, encoding: .utf8) else { return nil }
     return strdup(jsonStr)
 }
 
-// Idiomatic, type-safe struct for high-speed JSON serialization
 private struct GenerateStats: Encodable {
     let promptTokens: Int
     let generatedTokens: Int
@@ -157,34 +228,112 @@ private struct GenerateStats: Encodable {
     let stopReason: String
 }
 
-@_cdecl("bridge_generate_stream")
+private struct EvaluateStats: Encodable {
+    let promptTokens: Int
+    let promptTime: Double
+    let promptTokensPerSecond: Double
+}
+
+@_cdecl("bridge_model_evaluate")
+public func bridge_model_evaluate(
+    modelPtr: UnsafeMutableRawPointer,
+    cachePtr: UnsafeMutableRawPointer,
+    promptTokens: UnsafePointer<Int32>,
+    promptLength: Int32,
+    configJson: UnsafePointer<CChar>, // Add config for prefillStepSize
+    context: UnsafeMutableRawPointer,
+    callback: @convention(c) (UnsafeMutableRawPointer, Bool, UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
+) -> UnsafeMutableRawPointer {
+
+    let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
+    let cacheContainer = Unmanaged<CacheContainer>.fromOpaque(cachePtr).takeUnretainedValue()
+
+    let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
+    let tokens = Array(buffer).map { Int($0) }
+
+    let configObj = parseConfig(String(cString: configJson))
+    let stepSize = configObj.prefillStepSize ?? 512
+
+    let taskContainer = TaskContainer()
+
+    taskContainer.task = Task { [container, cacheContainer] in
+        let modelCtx = container.context
+        let startTime = Date()
+        var wasCancelled = false
+
+        do {
+            // Process in chunks so we can check for Task.isCancelled
+            for i in stride(from: 0, to: tokens.count, by: stepSize) {
+                if Task.isCancelled {
+                    wasCancelled = true
+                    break
+                }
+
+                let end = min(i + stepSize, tokens.count)
+                let chunk = Array(tokens[i..<end])
+                let input = MLXArray(chunk).reshaped([1, -1])
+
+                _ = modelCtx.model(input, cache: cacheContainer.caches)
+
+                // Force sync for this chunk so we can catch cancellation accurately
+                eval(cacheContainer.caches)
+            }
+
+            if wasCancelled {
+                "Evaluation Aborted".withCString { callback(context, false, nil, $0) }
+            } else {
+                let duration = Date().timeIntervalSince(startTime)
+                let stats = EvaluateStats(
+                    promptTokens: tokens.count,
+                    promptTime: duration,
+                    promptTokensPerSecond: Double(tokens.count) / duration
+                )
+
+                if let jsonData = try? JSONEncoder().encode(stats),
+                   let jsonStr = String(data: jsonData, encoding: .utf8) {
+                    jsonStr.withCString { callback(context, true, nil, $0) }
+                } else {
+                    callback(context, true, nil, nil)
+                }
+            }
+        } catch {
+            error.localizedDescription.withCString { callback(context, false, nil, $0) }
+        }
+    }
+
+    return Unmanaged.passRetained(taskContainer).toOpaque()
+}
+
+@_cdecl("bridge_generate_stream") // todo: this should be renamed to bridge_model_generate
 public func generateStream(
     modelPtr: UnsafeMutableRawPointer,
+    cachePtr: UnsafeMutableRawPointer?,
     promptTokens: UnsafePointer<Int32>,
     promptLength: Int32,
     configJson: UnsafePointer<CChar>,
     context: UnsafeMutableRawPointer,
     callback: @convention(c) (UnsafeMutableRawPointer, UnsafePointer<Int32>?, Int32, Bool, Bool, UnsafePointer<CChar>?) -> Void
-) {
-    // Zero-copy array mapping from UnsafeBufferPointer
+) -> UnsafeMutableRawPointer {
+
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
 
     let configObj = parseConfig(String(cString: configJson))
-    let chunkSize = Int(configObj.chunkSize ?? 5) // Ensure Int for comparisons
+    let chunkSize = Int(configObj.chunkSize ?? 5)
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
 
-   let task = Task { [container] in
+    var cache: [KVCache]? = nil
+    if let ptr = cachePtr {
+        let cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+        cache = cacheContainer.caches
+    }
+
+    let taskContainer = TaskContainer()
+
+    let task = Task { [container, cache] in
         let modelCtx = container.context
-        // DEFER: Guarantees cleanup executing immediately before the Task ends,
-        // no matter how the Task exits (success, throw, or cancellation).
 
-        defer {
-            _ = registryLock.withLock { activeTasks.removeValue(forKey: modelPtr) }
-        }
-
-        // Pre-allocate buffer to prevent repeated heap allocations
         var tokenBuffer = [Int32]()
         tokenBuffer.reserveCapacity(chunkSize)
 
@@ -198,6 +347,7 @@ public func generateStream(
 
             let (stream, _) = try MLXLMCommon.generateTokensTask(
                 input: input,
+                cache: cache,
                 parameters: parameters,
                 context: modelCtx,
                 includeStopToken: true
@@ -212,14 +362,10 @@ public func generateStream(
                 switch event {
                 case .token(let tokenId):
                     tokenBuffer.append(Int32(tokenId))
-
                     if tokenBuffer.count >= chunkSize {
-                        // Pointer is valid ONLY inside this block, which is safe because
-                        // our C code deep-copies it synchronously into the Arena block.
                         tokenBuffer.withUnsafeBufferPointer { ptr in
                             callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
                         }
-                        // Keeps allocated heap block intact
                         tokenBuffer.removeAll(keepingCapacity: true)
                     }
 
@@ -228,24 +374,19 @@ public func generateStream(
                 }
             }
 
-            // Re-assert in case MLX quietly swallowed cancellation
             if Task.isCancelled { wasCancelled = true }
 
         } catch {
             wasCancelled = error is CancellationError
-            if !wasCancelled {
-                finalErrorStr = error.localizedDescription
-            }
+            if !wasCancelled { finalErrorStr = error.localizedDescription }
         }
 
-        // --- 1. Flush any remaining tokens ---
         if !tokenBuffer.isEmpty {
             tokenBuffer.withUnsafeBufferPointer { ptr in
                 callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
             }
         }
 
-        // --- 2. FIRE GUARANTEED TERMINAL CALLBACK ---
         if wasCancelled {
             "Generation Cancelled".withCString { cStr in
                 callback(context, nil, 0, true, true, cStr)
@@ -265,7 +406,6 @@ public func generateStream(
                 stopReason: String(describing: stats.stopReason)
             )
 
-            // Native JSON serialization using Encodable
             if let jsonData = try? JSONEncoder().encode(statsStruct),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
                 jsonStr.withCString { cStr in
@@ -279,5 +419,17 @@ public func generateStream(
         }
     }
 
-    registryLock.withLock { activeTasks[modelPtr] = task }
+    taskContainer.task = task
+    return Unmanaged.passRetained(taskContainer).toOpaque()
+}
+
+@_cdecl("bridge_stream_abort")
+public func bridge_stream_abort(ptr: UnsafeMutableRawPointer) {
+    let container = Unmanaged<TaskContainer>.fromOpaque(ptr).takeUnretainedValue()
+    container.task?.cancel()
+}
+
+@_cdecl("bridge_stream_free")
+public func bridge_stream_free(ptr: UnsafeMutableRawPointer) {
+    Unmanaged<TaskContainer>.fromOpaque(ptr).release()
 }
