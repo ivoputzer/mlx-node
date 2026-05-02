@@ -138,6 +138,35 @@ export class MLXTarget extends MLXResource {
     // or should we have swift accept no cache just to extract prompt stats?
     return new MLXEvaluate(this.model, this.cache, tokens, options)
   }
+
+  // async * batch (promptTokensArray, options = {}) {
+  //   const tasks = promptTokensArray.map(tokens => this.generate(tokens, { ...options, chunkSize: 1, batchSize: 1 }))
+  //   const iterators = tasks.map(task => task[Symbol.asyncIterator]())
+  //   const active = iterators.length
+  //   try {
+  //     while (active > 0) {
+  //       // Wait for 1 tick from all active agents concurrently
+  //       const tickResults = await Promise.all(iterators.map(it => it.next()))
+  //       const tickTokens = []
+  //       for (let i = 0; i < tickResults.length; i++) {
+  //         const res = tickResults[i]
+  //         if (res.done) {
+  //           tickTokens.push(null) // Pad finished tasks
+  //           if (res.value) { /* Handle final stats if needed */ }
+  //         } else {
+  //           // Assume single token yielded because chunkSize is 1
+  //           tickTokens.push(res.value[0])
+  //         }
+  //       }
+  //       // If all returned -1, we are done
+  //       if (tickTokens.every(t => t === -1)) break
+  //       yield tickTokens
+  //     }
+  //   } finally {
+  //     // Ensure all tasks abort if the user breaks the loop
+  //     tasks.forEach(task => task.abort())
+  //   }
+  // }
 }
 
 export class MLXCache extends MLXTarget {
