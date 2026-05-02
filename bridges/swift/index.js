@@ -55,11 +55,9 @@ export class MLXEvaluate extends MLXTask {
 
   constructor (model, cache, tokens, options = {}) {
     const { promise, resolve, reject } = Promise.withResolvers()
-    console.log('mlx.evaluateTask: ', model?.ref, cache?.ref, tokens, configFrom(options))
     super(
-      mlx.evaluateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, _, json) => {
-        console.log('mlx.evaluateTask: ', error, _, json)
-        // this.dispose()
+      mlx.evaluateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, json) => {
+        this.dispose()
         if (error) {
           reject(error)
         } else {
