@@ -179,7 +179,7 @@ export class MLXCache extends MLXTarget {
 
   trim (numTokens) {
     if (!this.ref) throw new Error('Cache unavailable')
-    return mlx.trimCache(this.ref, numTokens) // i assume this is instant otherwise we need to revert to async
+    return mlx.trimCache(this.ref, numTokens)
   }
 
   clone () {
