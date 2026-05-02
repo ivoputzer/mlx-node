@@ -202,26 +202,8 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    guard !container.caches.isEmpty else { return 0 }
-
-    // Optional: Print to stdout if we are actively bypassing an Apple safety guard
-    let allTrimmable = container.caches.allSatisfy { $0.isTrimmable }
-    if !allTrimmable {
-        print("[mlx-node] Notice: Bypassing MLX isTrimmable guard. Forcing manual cache trim.")
-    }
-
-    var trimmedTokens = 0
-    let targetTrim = Int(numTokens)
-
-    for (i, cache) in container.caches.enumerated() {
-        let count = cache.trim(targetTrim)
-        // We use the first layer's trim count as the source of truth for the returned integer
-        if i == 0 {
-            trimmedTokens = count
-        }
-    }
-
-    return Int32(trimmedTokens)
+    let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens)) // Explicitly use Int32 for the boundary to match C's int32_t exactly
+    return Int32(trimmed)
 }
 
 // --- Metrics ---
