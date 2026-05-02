@@ -1,8 +1,7 @@
 import { createRequire } from 'node:module'
-import { parse } from 'node:path'
 
 const require = createRequire(import.meta.url)
-const addon = require('mlx-swift')
+const mlx = require('mlx-swift')
 
 // HELPERS
 
@@ -20,49 +19,24 @@ function configFrom (config) {
   return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
 }
 
-// OVERRIDES (eventually we will refactor the addon to conform to the js api)
-
-const mlx = {
-  // MLXResource
-  freeResource: addon.resourceFree,
-
-  // MLXCache
-  createCache: addon.cacheCreate,
-  loadCache: addon.cacheLoad,
-  saveCache: addon.cacheSave,
-  cloneCache: addon.cacheClone,
-  trimCache: addon.cacheTrim,
-
-  // MLXModel
-  loadModel: addon.modelLoad,
-
-  // MLXTarget|MLXGenerate|MLXEvaluate
-  generateTask: addon.modelGenerate,
-  evaluateTask: addon.modelEvaluate,
-  abortTask: addon.streamAbort,
-
-  // Functions?
-  systemMetrics: addon.systemMetrics,
-  systemClearCache: addon.systemClearCache
-}
-
 // CLASSES (this will be moved to mlx-node later, so that we can share them with mlx-cpp)
 
 export class MLXResource {
   #ref = null
 
   constructor (ref) {
-    this.#ref = ref // verify it is a pointer not just != null because we already do that in available
+    if (!ref) throw new Error('Invalid resource pointer')
+    this.#ref = ref
   }
 
   get ref () { return this.#ref }
   get available () { return this.#ref !== null }
 
   dispose () {
-    console.log('MLXResource.dispose', this.#ref)
-    if (!this.#ref) return
-    mlx.freeResource(this.#ref) // C tombstones this (if called multiple times it still returns true 🤔)
+    if (!this.#ref) return false // Prevent double-free logic from running
+    mlx.freeResource(this.#ref)
     this.#ref = null
+    return true
   }
 
   [Symbol.dispose] () {
@@ -72,9 +46,7 @@ export class MLXResource {
 
 export class MLXTask extends MLXResource {
   abort () {
-    if (this.ref) {
-      mlx.abort(this.ref)
-    }
+    if (this.available) mlx.abortTask(this.ref)
   }
 }
 
@@ -83,13 +55,16 @@ export class MLXEvaluate extends MLXTask {
 
   constructor (model, cache, tokens, options = {}) {
     const { promise, resolve, reject } = Promise.withResolvers()
-
+    console.log('mlx.evaluateTask: ', model?.ref, cache?.ref, tokens, configFrom(options))
     super(
-      mlx.evaluateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, json) => {
-        this.dispose()
-        return error
-          ? reject(error)
-          : resolve({ ...parseSafe(json), stopReason: 'prefill' })
+      mlx.evaluateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, _, json) => {
+        console.log('mlx.evaluateTask: ', error, _, json)
+        // this.dispose()
+        if (error) {
+          reject(error)
+        } else {
+          resolve({ ...parseSafe(json), stopReason: 'prefill' })
+        }
       })
     )
 
@@ -137,12 +112,6 @@ export class MLXGenerate extends MLXTask {
       this.dispose()
     }
   }
-
-  abort () {
-    if (this.ref) {
-      mlx.abort(this.ref)
-    }
-  }
 }
 
 export class MLXTarget extends MLXResource {
@@ -165,11 +134,11 @@ export class MLXTarget extends MLXResource {
   }
 
   async evaluate (tokens, options = {}) {
-    if (!this.valid) throw new Error('Target unavailable')
+    if (!this.available) throw new Error('Target unavailable')
     // todo: what if the user calls this on a model 🤔
     // should we create a cache on the fly MLXCache.fromModel(this)
     // or should we have swift accept no cache just to extract prompt stats?
-    return new MLXEvaluate(this.model, this.chat, tokens, options)
+    return new MLXEvaluate(this.model, this.cache, tokens, options)
   }
 }
 
@@ -190,17 +159,17 @@ export class MLXCache extends MLXTarget {
 
   #model = null
 
+  constructor (ref, model) {
+    super(ref)
+    this.#model = model
+  }
+
   get model () {
     return this.#model
   }
 
   get cache () {
     return this
-  }
-
-  constructor (ref, model) {
-    super(ref)
-    this.#model = model
   }
 
   async save (path) { // Save to Disk
@@ -212,7 +181,7 @@ export class MLXCache extends MLXTarget {
 
   trim (numTokens) {
     if (!this.ref) throw new Error('Cache unavailable')
-    return mlx.trimCache(this.id, numTokens) // i assume this is instant otherwise we need to revert to async
+    return mlx.trimCache(this.ref, numTokens) // i assume this is instant otherwise we need to revert to async
   }
 
   clone () {
