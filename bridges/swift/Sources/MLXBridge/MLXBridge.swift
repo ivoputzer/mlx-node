@@ -184,10 +184,11 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 
 
 @_cdecl("bridge_cache_trim")
-public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int) -> Int {
+public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    // Trims N tokens from the end of all caches in the container
-    return MLXLMCommon.trimPromptCache(container.caches, numTokens: numTokens)
+    // Convert Int32 from C into Int for MLX, then back to Int32 for C
+    let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
+    return Int32(trimmed)
 }
 
 // --- Metrics ---
