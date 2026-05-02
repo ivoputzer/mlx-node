@@ -194,10 +194,7 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-
-    // Classes are passed by reference, no inout (&) needed.
     let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
-
     return Int32(trimmed)
 }
 
@@ -269,16 +266,22 @@ public func bridge_model_evaluate_task(
             let input = LMInput(tokens: MLXArray(tokens))
             let parameters = configObj.toGenerateParameters()
 
-            // 1. If evaluating without a prior cache, we must initialize an empty one
-            // so `model.prepare` has a place to write the KV states.
             if caches == nil {
                 caches = container.context.model.newCache(parameters: parameters)
+            } else {
+                maybeQuantizeKVCache(
+                    cache: &caches!,
+                    kvBits: configObj.kvBits,
+                    kvGroupSize: configObj.kvGroupSize ?? 64,
+                    quantizedKVStart: configObj.quantizedKVStart ?? -1 // Force -1
+                )
+                if cacheContainer != nil {
+                    cacheContainer!.caches = caches!
+                }
             }
 
             let startTime = Date()
 
-            // 2. model.prepare internally chunks the prompt by `prefillStepSize` asynchronously.
-            // This is the identical highly-optimized path used by MLX internally.
             switch try container.context.model.prepare(input, cache: caches!, windowSize: parameters.prefillStepSize) {
             case .tokens(let outTokens):
                 let result = container.context.model(
@@ -286,29 +289,10 @@ public func bridge_model_evaluate_task(
                     cache: caches!.isEmpty ? nil : caches!,
                     state: nil
                 )
-                maybeQuantizeKVCache(
-                    cache: &caches!,
-                    kvBits: configObj.kvBits,
-                    kvGroupSize: configObj.kvGroupSize ?? 64,
-                    quantizedKVStart: configObj.quantizedKVStart ?? 0
-                )
-                // Force Metal to evaluate the graph
                 eval(result.logits)
 
             case .logits(let result):
-                maybeQuantizeKVCache(
-                    cache: &caches!,
-                    kvBits: configObj.kvBits,
-                    kvGroupSize: configObj.kvGroupSize ?? 64,
-                    quantizedKVStart: configObj.quantizedKVStart ?? 0
-                )
-                // Force Metal to evaluate the graph
                 eval(result.logits)
-            }
-
-            // 3. Sync the array back to the JS-owned pointer if one was provided
-            if cacheContainer != nil {
-                cacheContainer!.caches = caches!
             }
 
             if Task.isCancelled {
@@ -316,7 +300,6 @@ public func bridge_model_evaluate_task(
                 return
             }
 
-            // By this point, `eval()` guarantees the GPU is finished, making the duration perfectly accurate.
             let duration = Date().timeIntervalSince(startTime)
             let stats = EvaluateStats(
                 promptTokens: tokens.count,
@@ -368,13 +351,14 @@ public func bridge_model_generate_task(
     let task = Task { [container, cacheContainer, localCache] in
         var caches = localCache
 
+        // CRITICAL FIX: Pre-quantize BEFORE passing to TokenIterator.
+        // The TokenIterator sees they are already quantized and mutates our stable references.
         if caches != nil {
-            // Pre-quantize so generateTokensTask gets the optimized struct references
             maybeQuantizeKVCache(
                 cache: &caches!,
                 kvBits: configObj.kvBits,
                 kvGroupSize: configObj.kvGroupSize ?? 64,
-                quantizedKVStart: configObj.quantizedKVStart ?? 0
+                quantizedKVStart: configObj.quantizedKVStart ?? -1 // Force -1
             )
             cacheContainer?.caches = caches!
         }
