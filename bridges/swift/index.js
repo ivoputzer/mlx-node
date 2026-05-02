@@ -191,7 +191,6 @@ export class MLXCache extends MLXTarget {
     const { isTrimmable } = this.debug()
     return isTrimmable // This value should be cached
   }
-  }
 
   debug () {
     if (!this.available) throw new Error('Cache unavailable')
