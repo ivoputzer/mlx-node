@@ -186,7 +186,7 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    // Convert Int32 from C into Int for MLX, then back to Int32 for C
+    // Explicitly use Int32 for the boundary to match C's int32_t exactly
     let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
     return Int32(trimmed)
 }
@@ -229,7 +229,7 @@ private struct EvaluateStats: Encodable {
 @_cdecl("bridge_model_evaluate_task")
 public func bridge_model_evaluate_task(
     modelPtr: UnsafeMutableRawPointer,
-    cachePtr: UnsafeMutableRawPointer?, // <-- Made Optional
+    cachePtr: UnsafeMutableRawPointer?,
     promptTokens: UnsafePointer<Int32>,
     promptLength: Int32,
     configJson: UnsafePointer<CChar>,
@@ -238,22 +238,28 @@ public func bridge_model_evaluate_task(
 ) -> UnsafeMutableRawPointer {
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
+    var cacheContainer: CacheContainer? = nil
+    var cacheArray: [KVCache]? = nil
 
-    // Extract optional cache array
-    var cache: [KVCache]? = nil
     if let ptr = cachePtr {
-        let cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-        cache = cacheContainer.caches
+        cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+        cacheArray = cacheContainer?.caches
     }
 
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
-    let stepSize = parseConfig(String(cString: configJson)).prefillStepSize ?? 512
+
+    let configObj = parseConfig(String(cString: configJson))
+    let stepSize = configObj.prefillStepSize ?? 512
+    let kvBits = configObj.kvBits
+    let kvGroupSize = configObj.kvGroupSize ?? 64
+    let quantizedKVStart = configObj.quantizedKVStart ?? 0
 
     let taskContainer = TaskContainer()
 
-    taskContainer.task = Task { [container, cache] in
+    taskContainer.task = Task { [container, cacheContainer, cacheArray] in
         let modelCtx = container.context
+        var localCache = cacheArray
         let startTime = Date()
         var wasCancelled = false
 
@@ -268,15 +274,21 @@ public func bridge_model_evaluate_task(
                 let chunk = Array(tokens[i..<end])
                 let input = MLXArray(chunk).reshaped([1, -1])
 
-                // Evaluate chunk
-                let out = modelCtx.model(input, cache: cache)
+                _ = modelCtx.model(input, cache: localCache)
 
-                // Force Metal to compute. If we have a cache, eval the cache state.
-                // If we don't, eval the raw model output so the computation actually happens!
-                if let activeCache = cache {
-                    eval(activeCache)
-                } else {
-                    eval(out)
+                // Force metal to sync
+                if let active = localCache { eval(active) }
+
+                // CRITICAL: Dynamically quantize the cache if it crossed the threshold!
+                if localCache != nil {
+                    maybeQuantizeKVCache(
+                        cache: &localCache!,
+                        kvBits: kvBits,
+                        kvGroupSize: kvGroupSize,
+                        quantizedKVStart: quantizedKVStart
+                    )
+                    // Write the mutated array back to the JS-owned container
+                    cacheContainer?.caches = localCache!
                 }
             }
 
@@ -289,7 +301,6 @@ public func bridge_model_evaluate_task(
                     promptTime: duration,
                     promptTokensPerSecond: Double(tokens.count) / duration
                 )
-
                 if let jsonData = try? JSONEncoder().encode(stats),
                    let jsonStr = String(data: jsonData, encoding: .utf8) {
                     jsonStr.withCString { callback(context, true, nil, $0) }
@@ -301,7 +312,6 @@ public func bridge_model_evaluate_task(
             error.localizedDescription.withCString { callback(context, false, nil, $0) }
         }
     }
-
     return Unmanaged.passRetained(taskContainer).toOpaque()
 }
 
