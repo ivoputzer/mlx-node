@@ -79,7 +79,15 @@ private class ModelContainer {
 
 private class CacheContainer {
     var caches: [KVCache]
-    init(_ caches: [KVCache]) { self.caches = caches }
+    var kvBits: Int?
+    var kvGroupSize: Int?
+    var quantizedKVStart: Int?
+    init(_ caches: [KVCache], kvBits: Int? = nil, kvGroupSize: Int? = nil, quantizedKVStart: Int? = nil) {
+        self.caches = caches
+        self.kvBits = kvBits
+        self.kvGroupSize = kvGroupSize
+        self.quantizedKVStart = quantizedKVStart
+    }
 }
 
 private class TaskContainer {
@@ -135,7 +143,7 @@ public func bridge_cache_create(modelPtr: UnsafeMutableRawPointer, configJson: U
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
     let configObj = parseConfig(String(cString: configJson))
     let caches = container.context.model.newCache(parameters: configObj.toGenerateParameters())
-    let cacheContainer = CacheContainer(caches)
+    let cacheContainer = CacheContainer(caches, kvBits: configObj.kvBits, kvGroupSize: configObj.kvGroupSize, quantizedKVStart: configObj.quantizedKVStart)
     return Unmanaged.passRetained(cacheContainer).toOpaque()
 }
 
@@ -157,7 +165,7 @@ public func bridge_cache_clone(ptr: UnsafeMutableRawPointer) -> UnsafeMutableRaw
         }
     }
 
-    let newContainer = CacheContainer(clonedCaches)
+    let newContainer = CacheContainer(clonedCaches, kvBits: container.kvBits, kvGroupSize: container.kvGroupSize, quantizedKVStart: container.quantizedKVStart)
     return Unmanaged.passRetained(newContainer).toOpaque()
 }
 
@@ -194,8 +202,26 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
-    return Int32(trimmed)
+    guard !container.caches.isEmpty else { return 0 }
+
+    // Optional: Print to stdout if we are actively bypassing an Apple safety guard
+    let allTrimmable = container.caches.allSatisfy { $0.isTrimmable }
+    if !allTrimmable {
+        print("[mlx-node] Notice: Bypassing MLX isTrimmable guard. Forcing manual cache trim.")
+    }
+
+    var trimmedTokens = 0
+    let targetTrim = Int(numTokens)
+
+    for (i, cache) in container.caches.enumerated() {
+        let count = cache.trim(targetTrim)
+        // We use the first layer's trim count as the source of truth for the returned integer
+        if i == 0 {
+            trimmedTokens = count
+        }
+    }
+
+    return Int32(trimmedTokens)
 }
 
 // --- Metrics ---
@@ -263,21 +289,19 @@ public func bridge_model_evaluate_task(
         var caches = localCache
 
         do {
+            let activeKvBits = configObj.kvBits ?? cacheContainer?.kvBits
+            let activeGroupSize = configObj.kvGroupSize ?? cacheContainer?.kvGroupSize ?? 64
+            let activeStart = configObj.quantizedKVStart ?? cacheContainer?.quantizedKVStart ?? 0
+
+            var parameters = configObj.toGenerateParameters()
+            parameters.kvBits = activeKvBits
+            parameters.kvGroupSize = activeGroupSize
+            parameters.quantizedKVStart = activeStart
+
             let input = LMInput(tokens: MLXArray(tokens))
-            let parameters = configObj.toGenerateParameters()
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: parameters)
-            } else {
-                maybeQuantizeKVCache(
-                    cache: &caches!,
-                    kvBits: configObj.kvBits,
-                    kvGroupSize: configObj.kvGroupSize ?? 64,
-                    quantizedKVStart: configObj.quantizedKVStart ?? -1 // Force -1
-                )
-                if cacheContainer != nil {
-                    cacheContainer!.caches = caches!
-                }
             }
 
             let startTime = Date()
@@ -294,6 +318,16 @@ public func bridge_model_evaluate_task(
             case .logits(let result):
                 eval(result.logits)
             }
+
+            // Manually quantize safely AFTER prefill
+            maybeQuantizeKVCache(
+                cache: &caches!,
+                kvBits: activeKvBits,
+                kvGroupSize: activeGroupSize,
+                quantizedKVStart: activeStart
+            )
+
+            cacheContainer?.caches = caches!
 
             if Task.isCancelled {
                 "Evaluation Cancelled".withCString { callback(context, false, nil, $0) }
@@ -351,58 +385,141 @@ public func bridge_model_generate_task(
     let task = Task { [container, cacheContainer, localCache] in
         var caches = localCache
 
-        // CRITICAL FIX: Pre-quantize BEFORE passing to TokenIterator.
-        // The TokenIterator sees they are already quantized and mutates our stable references.
-        if caches != nil {
-            maybeQuantizeKVCache(
-                cache: &caches!,
-                kvBits: configObj.kvBits,
-                kvGroupSize: configObj.kvGroupSize ?? 64,
-                quantizedKVStart: configObj.quantizedKVStart ?? -1 // Force -1
-            )
-            cacheContainer?.caches = caches!
-        }
+        let activeKvBits = configObj.kvBits ?? cacheContainer?.kvBits
+        let activeGroupSize = configObj.kvGroupSize ?? cacheContainer?.kvGroupSize ?? 64
+        let activeStart = configObj.quantizedKVStart ?? cacheContainer?.quantizedKVStart ?? 0
+
+        var params = configObj.toGenerateParameters()
+        params.kvBits = activeKvBits
+        params.kvGroupSize = activeGroupSize
+        params.quantizedKVStart = activeStart
 
         var tokenBuffer = [Int32]()
         tokenBuffer.reserveCapacity(chunkSize)
 
-        var finalStats: GenerateCompletionInfo? = nil
+        var finalStats: GenerateStats? = nil
         var finalErrorStr: String? = nil
         var wasCancelled = false
 
         do {
             let input = LMInput(tokens: MLXArray(tokens))
 
-            let (stream, _) = try MLXLMCommon.generateTokensTask(
-                input: input,
-                cache: caches,
-                parameters: configObj.toGenerateParameters(),
-                context: container.context,
-                includeStopToken: true
-            )
+            if caches == nil {
+                caches = container.context.model.newCache(parameters: params)
+            }
 
-            for await event in stream {
+            var processor = params.processor()
+            let sampler = params.sampler()
+            var y: LMInput.Text
+            var state: LMOutput.State? = nil
+
+            func convertToToken(logits: MLXArray, processor: inout LogitProcessor?, sampler: LogitSampler) -> MLXArray {
+                var l = logits[0..., -1, 0...]
+                l = processor?.process(logits: l) ?? l
+                let t = sampler.sample(logits: l)
+                processor?.didSample(token: t)
+                return t
+            }
+
+            let prefillStart = Date.timeIntervalSinceReferenceDate
+
+            processor?.prompt(input.text.tokens)
+
+            switch try container.context.model.prepare(input, cache: caches!, windowSize: params.prefillStepSize) {
+              case .tokens(let outTokens):
+                let result = container.context.model(outTokens[text: .newAxis], cache: caches!.isEmpty ? nil : caches!, state: state)
+                state = result.state
+                maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+                let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                y = .init(tokens: token)
+                MLX.asyncEval(y.tokens)
+              case .logits(let result):
+                state = result.state
+                let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                y = .init(tokens: token)
+                MLX.asyncEval(y.tokens)
+            }
+
+            let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+
+            var start = Date.timeIntervalSinceReferenceDate
+            var promptTime: TimeInterval = 0
+            var tokenCount = 0
+
+            var stopTokenIds = container.context.configuration.eosTokenIds
+            if let tokenizerEOS = container.context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
+            for token in container.context.configuration.extraEOSTokens {
+                if let id = container.context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
+            }
+
+            let unknownTokenId = container.context.tokenizer.unknownTokenId ?? -1
+            var stopReason = "stop"
+
+            while true {
                 if Task.isCancelled {
                     wasCancelled = true
+                    stopReason = "cancelled"
                     break
                 }
 
-                switch event {
-                case .token(let tokenId):
-                    tokenBuffer.append(Int32(tokenId))
-                    if tokenBuffer.count >= chunkSize {
-                        tokenBuffer.withUnsafeBufferPointer { ptr in
-                            callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
-                        }
-                        tokenBuffer.removeAll(keepingCapacity: true)
-                    }
+                // CONTINUOUS SYNC: Ensure the JS container ALWAYS holds the exact array instance currently in VRAM
+                cacheContainer?.caches = caches!
 
-                case .info(let stats):
-                    finalStats = stats
+                let currentTokenId = y.tokens.item(Int.self)
+
+                if promptTime == 0 {
+                    promptTime = Date.timeIntervalSinceReferenceDate - start
+                    start = Date.timeIntervalSinceReferenceDate
                 }
+
+                tokenBuffer.append(Int32(currentTokenId))
+                tokenCount += 1
+
+                if tokenBuffer.count >= chunkSize {
+                    tokenBuffer.withUnsafeBufferPointer { ptr in
+                        callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
+                    }
+                    tokenBuffer.removeAll(keepingCapacity: true)
+                }
+
+                if currentTokenId == unknownTokenId || stopTokenIds.contains(currentTokenId) {
+                    break
+                }
+
+                if let maxT = params.maxTokens, tokenCount >= maxT {
+                    stopReason = "length"
+                    break
+                }
+
+                let result = container.context.model(y[text: .newAxis], cache: caches!.isEmpty ? nil : caches!, state: state)
+
+                state = result.state
+                maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+
+                let nextToken = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                y = .init(tokens: nextToken)
+
+                MLX.asyncEval(y.tokens)
             }
 
+            cacheContainer?.caches = caches!
+
             if Task.isCancelled { wasCancelled = true }
+
+            Stream().synchronize()
+
+            let generateTime = Date.timeIntervalSinceReferenceDate - start
+            let finalPromptTime = promptTime + promptPrefillTime
+
+            finalStats = GenerateStats(
+                promptTokens: tokens.count,
+                generatedTokens: tokenCount,
+                promptTime: finalPromptTime,
+                generateTime: generateTime,
+                promptTokensPerSecond: finalPromptTime > 0 ? Double(tokens.count) / finalPromptTime : 0.0,
+                tokensPerSecond: generateTime > 0 ? Double(tokenCount) / generateTime : 0.0,
+                stopReason: stopReason
+            )
 
         } catch {
             wasCancelled = error is CancellationError
@@ -424,17 +541,7 @@ public func bridge_model_generate_task(
                 callback(context, nil, 0, true, true, cStr)
             }
         } else if let stats = finalStats {
-            let statsStruct = GenerateStats(
-                promptTokens: stats.promptTokenCount,
-                generatedTokens: stats.generationTokenCount,
-                promptTime: stats.promptTime,
-                generateTime: stats.generateTime,
-                promptTokensPerSecond: stats.promptTokensPerSecond,
-                tokensPerSecond: stats.tokensPerSecond,
-                stopReason: String(describing: stats.stopReason)
-            )
-
-            if let jsonData = try? JSONEncoder().encode(statsStruct),
+            if let jsonData = try? JSONEncoder().encode(stats),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
                 jsonStr.withCString { cStr in
                     callback(context, nil, 0, true, false, cStr)
