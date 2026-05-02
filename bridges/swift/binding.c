@@ -25,6 +25,7 @@ extern void* bridge_cache_clone(void* ptr);
 extern void bridge_cache_save(void* ptr, const char* path, void *context, void (*callback)(void *, bool, void *, const char *));
 extern void bridge_cache_load(const char* path, void *context, void (*callback)(void *, bool, void *, const char *));
 extern int32_t bridge_cache_trim(void* ptr, int32_t num_tokens);
+extern char* bridge_cache_debug(void* ptr);
 
 extern void* bridge_model_generate_task(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void*, const int32_t*, int32_t, bool, bool, const char*));
 extern void* bridge_model_evaluate_task(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void *, bool, void *, const char *));
@@ -446,6 +447,20 @@ napi_value Export_CacheTrim(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value Export_CacheDebug(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* resource;
+  napi_get_value_external(env, args[0], (void**)&resource);
+
+  char* json_str = bridge_cache_debug(resource->native_ptr);
+  napi_value result;
+  napi_create_string_utf8(env, json_str, NAPI_AUTO_LENGTH, &result);
+  free(json_str);
+  return result;
+}
+
 napi_value Export_ModelGenerateTask(napi_env env, napi_callback_info info) {
   size_t argc = 5; napi_value args[5]; // model, cache, tokens, json, callback
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
@@ -616,6 +631,7 @@ napi_value init(napi_env env, napi_value exports) {
       {"saveCache", NULL, Export_CacheSave, NULL, NULL, NULL, napi_default, NULL},
       {"cloneCache", NULL, Export_CacheClone, NULL, NULL, NULL, napi_default, NULL},
       {"trimCache", NULL, Export_CacheTrim, NULL, NULL, NULL, napi_default, NULL},
+      {"debugCache", NULL, Export_CacheDebug, NULL, NULL, NULL, napi_default, NULL},
 
       {"loadModel", NULL, Export_ModelLoad, NULL, NULL, NULL, napi_default, NULL},
       {"generateTask", NULL, Export_ModelGenerateTask, NULL, NULL, NULL, napi_default, NULL},
@@ -626,7 +642,7 @@ napi_value init(napi_env env, napi_value exports) {
       {"systemClearCache", NULL, Export_SystemClearCache, NULL, NULL, NULL, napi_default, NULL},
   };
 
-  napi_define_properties(env, exports, 12, desc);
+  napi_define_properties(env, exports, 13, desc);
   return exports;
 }
 

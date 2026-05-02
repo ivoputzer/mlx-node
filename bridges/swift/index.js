@@ -186,6 +186,17 @@ export class MLXCache extends MLXTarget {
     if (!this.ref) throw new Error('Cache unavailable')
     return new MLXCache(mlx.cloneCache(this.ref), this.#model)
   }
+
+  get isTrimmable () {
+    const { isTrimmable } = this.debug()
+    return isTrimmable // This value should be cached
+  }
+  }
+
+  debug () {
+    if (!this.available) throw new Error('Cache unavailable')
+    return JSON.parse(mlx.debugCache(this.ref))
+  }
 }
 
 export class MLXModel extends MLXTarget {

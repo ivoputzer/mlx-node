@@ -447,6 +447,7 @@ public func bridge_model_generate_task(
             var tokenCount = 0
 
             var stopTokenIds = container.context.configuration.eosTokenIds
+
             if let tokenizerEOS = container.context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
             for token in container.context.configuration.extraEOSTokens {
                 if let id = container.context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
@@ -567,4 +568,20 @@ public func bridge_model_abort_task(ptr: UnsafeMutableRawPointer) {
 @_cdecl("bridge_model_free_task")
 public func bridge_model_free_task(ptr: UnsafeMutableRawPointer) {
     Unmanaged<TaskContainer>.fromOpaque(ptr).release()
+}
+
+@_cdecl("bridge_cache_debug")
+public func bridge_cache_debug(ptr: UnsafeMutableRawPointer) -> UnsafeMutablePointer<CChar>? {
+    let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+    guard let first = container.caches.first else { return strdup("{}") }
+
+    let info = """
+    {
+        "layers": \(container.caches.count),
+        "type": "\(type(of: first))",
+        "offset": \(first.offset),
+        "isTrimmable": \(first.isTrimmable)
+    }
+    """
+    return strdup(info)
 }
