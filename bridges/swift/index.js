@@ -184,7 +184,7 @@ export class MLXCache extends MLXTarget {
 
   clone () {
     if (!this.ref) throw new Error('Cache unavailable')
-    return new MLXCache(mlx.cloneCache(this.ref)) // i assume this is instant otherwise we need to revert to async
+    return new MLXCache(mlx.cloneCache(this.ref), this.#model)
   }
 }
 
