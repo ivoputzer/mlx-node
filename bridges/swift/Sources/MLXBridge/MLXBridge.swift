@@ -147,8 +147,16 @@ public func bridge_cache_free(ptr: UnsafeMutableRawPointer) {
 @_cdecl("bridge_cache_clone")
 public func bridge_cache_clone(ptr: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    // KVCache.copy() creates a deep, independent copy of the KV arrays in VRAM
     let clonedCaches = container.caches.map { $0.copy() }
+
+    // CRITICAL FIX: Force Metal to physically realize the copied arrays in VRAM.
+    // This prevents "cannot generate on cloned cache" lazy-evaluation crashes across threads.
+    for cache in clonedCaches {
+        if !cache.state.isEmpty {
+            eval(cache.state)
+        }
+    }
+
     let newContainer = CacheContainer(clonedCaches)
     return Unmanaged.passRetained(newContainer).toOpaque()
 }
@@ -186,8 +194,10 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    // Explicitly use Int32 for the boundary to match C's int32_t exactly
+
+    // Classes are passed by reference, no inout (&) needed.
     let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
+
     return Int32(trimmed)
 }
 
@@ -239,74 +249,86 @@ public func bridge_model_evaluate_task(
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
     var cacheContainer: CacheContainer? = nil
-    var cacheArray: [KVCache]? = nil
+    var localCache: [KVCache]? = nil
 
     if let ptr = cachePtr {
         cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-        cacheArray = cacheContainer?.caches
+        localCache = cacheContainer?.caches
     }
 
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
-
     let configObj = parseConfig(String(cString: configJson))
-    let stepSize = configObj.prefillStepSize ?? 512
-    let kvBits = configObj.kvBits
-    let kvGroupSize = configObj.kvGroupSize ?? 64
-    let quantizedKVStart = configObj.quantizedKVStart ?? 0
 
     let taskContainer = TaskContainer()
 
-    taskContainer.task = Task { [container, cacheContainer, cacheArray] in
-        let modelCtx = container.context
-        var localCache = cacheArray
-        let startTime = Date()
-        var wasCancelled = false
+    taskContainer.task = Task { [container, cacheContainer, localCache] in
+        var caches = localCache
 
         do {
-            for i in stride(from: 0, to: tokens.count, by: stepSize) {
-                if Task.isCancelled {
-                    wasCancelled = true
-                    break
-                }
+            let input = LMInput(tokens: MLXArray(tokens))
+            let parameters = configObj.toGenerateParameters()
 
-                let end = min(i + stepSize, tokens.count)
-                let chunk = Array(tokens[i..<end])
-                let input = MLXArray(chunk).reshaped([1, -1])
-
-                _ = modelCtx.model(input, cache: localCache)
-
-                // Force metal to sync
-                if let active = localCache { eval(active) }
-
-                // CRITICAL: Dynamically quantize the cache if it crossed the threshold!
-                if localCache != nil {
-                    maybeQuantizeKVCache(
-                        cache: &localCache!,
-                        kvBits: kvBits,
-                        kvGroupSize: kvGroupSize,
-                        quantizedKVStart: quantizedKVStart
-                    )
-                    // Write the mutated array back to the JS-owned container
-                    cacheContainer?.caches = localCache!
-                }
+            // 1. If evaluating without a prior cache, we must initialize an empty one
+            // so `model.prepare` has a place to write the KV states.
+            if caches == nil {
+                caches = container.context.model.newCache(parameters: parameters)
             }
 
-            if wasCancelled {
-                "Evaluation Aborted".withCString { callback(context, false, nil, $0) }
-            } else {
-                let duration = Date().timeIntervalSince(startTime)
-                let stats = EvaluateStats(
-                    promptTokens: tokens.count,
-                    promptTime: duration,
-                    promptTokensPerSecond: Double(tokens.count) / duration
+            let startTime = Date()
+
+            // 2. model.prepare internally chunks the prompt by `prefillStepSize` asynchronously.
+            // This is the identical highly-optimized path used by MLX internally.
+            switch try container.context.model.prepare(input, cache: caches!, windowSize: parameters.prefillStepSize) {
+            case .tokens(let outTokens):
+                let result = container.context.model(
+                    outTokens[text: .newAxis],
+                    cache: caches!.isEmpty ? nil : caches!,
+                    state: nil
                 )
-                if let jsonData = try? JSONEncoder().encode(stats),
-                   let jsonStr = String(data: jsonData, encoding: .utf8) {
-                    jsonStr.withCString { callback(context, true, nil, $0) }
-                } else {
-                    callback(context, true, nil, nil)
-                }
+                maybeQuantizeKVCache(
+                    cache: &caches!,
+                    kvBits: configObj.kvBits,
+                    kvGroupSize: configObj.kvGroupSize ?? 64,
+                    quantizedKVStart: configObj.quantizedKVStart ?? 0
+                )
+                // Force Metal to evaluate the graph
+                eval(result.logits)
+
+            case .logits(let result):
+                maybeQuantizeKVCache(
+                    cache: &caches!,
+                    kvBits: configObj.kvBits,
+                    kvGroupSize: configObj.kvGroupSize ?? 64,
+                    quantizedKVStart: configObj.quantizedKVStart ?? 0
+                )
+                // Force Metal to evaluate the graph
+                eval(result.logits)
+            }
+
+            // 3. Sync the array back to the JS-owned pointer if one was provided
+            if cacheContainer != nil {
+                cacheContainer!.caches = caches!
+            }
+
+            if Task.isCancelled {
+                "Evaluation Cancelled".withCString { callback(context, false, nil, $0) }
+                return
+            }
+
+            // By this point, `eval()` guarantees the GPU is finished, making the duration perfectly accurate.
+            let duration = Date().timeIntervalSince(startTime)
+            let stats = EvaluateStats(
+                promptTokens: tokens.count,
+                promptTime: duration,
+                promptTokensPerSecond: Double(tokens.count) / duration
+            )
+
+            if let jsonData = try? JSONEncoder().encode(stats),
+               let jsonStr = String(data: jsonData, encoding: .utf8) {
+                jsonStr.withCString { callback(context, true, nil, $0) }
+            } else {
+                callback(context, true, nil, nil)
             }
         } catch {
             error.localizedDescription.withCString { callback(context, false, nil, $0) }
@@ -334,16 +356,28 @@ public func bridge_model_generate_task(
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
 
-    var cache: [KVCache]? = nil
+    var cacheContainer: CacheContainer? = nil
+    var localCache: [KVCache]? = nil
     if let ptr = cachePtr {
-        let cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-        cache = cacheContainer.caches
+        cacheContainer = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+        localCache = cacheContainer?.caches
     }
 
     let taskContainer = TaskContainer()
 
-    let task = Task { [container, cache] in
-        let modelCtx = container.context
+    let task = Task { [container, cacheContainer, localCache] in
+        var caches = localCache
+
+        if caches != nil {
+            // Pre-quantize so generateTokensTask gets the optimized struct references
+            maybeQuantizeKVCache(
+                cache: &caches!,
+                kvBits: configObj.kvBits,
+                kvGroupSize: configObj.kvGroupSize ?? 64,
+                quantizedKVStart: configObj.quantizedKVStart ?? 0
+            )
+            cacheContainer?.caches = caches!
+        }
 
         var tokenBuffer = [Int32]()
         tokenBuffer.reserveCapacity(chunkSize)
@@ -354,13 +388,12 @@ public func bridge_model_generate_task(
 
         do {
             let input = LMInput(tokens: MLXArray(tokens))
-            let parameters = configObj.toGenerateParameters()
 
             let (stream, _) = try MLXLMCommon.generateTokensTask(
                 input: input,
-                cache: cache,
-                parameters: parameters,
-                context: modelCtx,
+                cache: caches,
+                parameters: configObj.toGenerateParameters(),
+                context: container.context,
                 includeStopToken: true
             )
 
