@@ -22,7 +22,6 @@ struct BridgeGenerateConfig: Decodable {
     var frequencyContextSize: Int?
     var prefillStepSize: Int?
 
-    // custom configuration
     var batchSize: Int?
     var chunkSize: Int?
     var stopTokenIds: [Int]?
@@ -59,18 +58,14 @@ private func parseConfig(_ jsonString: String) -> BridgeGenerateConfig {
 
 private func compileStopTokens(context: ModelContext, config: BridgeGenerateConfig) -> Set<Int> {
     var stopTokenIds = context.configuration.eosTokenIds
-
     if let tokenizerEOS = context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
     if let unknownTokenId = context.tokenizer.unknownTokenId { stopTokenIds.insert(unknownTokenId) }
-
     for token in context.configuration.extraEOSTokens {
         if let id = context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
     }
-
     if let customStopIds = config.stopTokenIds {
         stopTokenIds.formUnion(customStopIds)
     }
-
     return stopTokenIds
 }
 
@@ -114,13 +109,33 @@ private class CacheContainer {
 private class TaskContainer {
     var task: Task<Void, Never>?
     init() {}
-    deinit {
-        // Ultimate safety: If V8 GCs the stream handle before it finishes, we kill the work.
-        task?.cancel()
-    }
+    deinit { task?.cancel() }
 }
 
-// --- 3. Bridge Logic ---
+// --- 3. Shared Cache Utilities ---
+
+private func expandCache(_ caches: inout [KVCache], batchSize: Int) {
+    guard batchSize > 1 else { return }
+
+    var prefillStates: [MLXArray] = []
+    for cache in caches {
+        prefillStates.append(contentsOf: cache.state)
+    }
+    eval(prefillStates)
+
+    var postBroadcastStates: [MLXArray] = []
+    for i in 0..<caches.count {
+        // SAFETY: Only duplicate if the state actually has data
+        let duplicated = caches[i].state.map { array in
+            array.size > 0 ? MLX.concatenated(Array(repeating: array, count: batchSize), axis: 0) : array
+        }
+        caches[i].state = duplicated
+        postBroadcastStates.append(contentsOf: duplicated)
+    }
+    eval(postBroadcastStates)
+}
+
+// --- 4. Bridge Logic ---
 
 public typealias BridgeAsyncCallback = @convention(c) (UnsafeMutableRawPointer, Bool, UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
 
@@ -131,11 +146,7 @@ public func loadMetal() {
 }
 
 @_cdecl("bridge_metal_clear_cache")
-public func bridge_metal_clear_cache() {
-    // This tells the MLX GPU backend to release all unused buffers back to macOS
-    // MLX.GPU.clearCache() @deprected
-    Memory.clearCache()
-}
+public func bridge_metal_clear_cache() { Memory.clearCache() }
 
 @_cdecl("bridge_model_load")
 public func loadModel(path: UnsafePointer<CChar>, context: UnsafeMutableRawPointer, callback: BridgeAsyncCallback) {
@@ -157,8 +168,6 @@ public func bridge_model_free(ptr: UnsafeMutableRawPointer) {
     Unmanaged<ModelContainer>.fromOpaque(ptr).release()
 }
 
-// --- Cache API ---
-
 @_cdecl("bridge_cache_create")
 public func bridge_cache_create(modelPtr: UnsafeMutableRawPointer, configJson: UnsafePointer<CChar>) -> UnsafeMutableRawPointer {
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
@@ -177,15 +186,9 @@ public func bridge_cache_free(ptr: UnsafeMutableRawPointer) {
 public func bridge_cache_clone(ptr: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
     let clonedCaches = container.caches.map { $0.copy() }
-
-    // CRITICAL FIX: Force Metal to physically realize the copied arrays in VRAM.
-    // This prevents "cannot generate on cloned cache" lazy-evaluation crashes across threads.
     for cache in clonedCaches {
-        if !cache.state.isEmpty {
-            eval(cache.state)
-        }
+        if !cache.state.isEmpty { eval(cache.state) }
     }
-
     let newContainer = CacheContainer(clonedCaches, kvBits: container.kvBits, kvGroupSize: container.kvGroupSize, quantizedKVStart: container.quantizedKVStart)
     return Unmanaged.passRetained(newContainer).toOpaque()
 }
@@ -197,7 +200,7 @@ public func bridge_cache_save(ptr: UnsafeMutableRawPointer, path: UnsafePointer<
     Task {
         do {
             try MLXLMCommon.savePromptCache(url: url, cache: container.caches)
-            callback(context, true, nil, nil) // Success, no ptr needed
+            callback(context, true, nil, nil)
         } catch {
             error.localizedDescription.withCString { callback(context, false, nil, $0) }
         }
@@ -222,11 +225,10 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
-    let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens)) // Explicitly use Int32 for the boundary to match C's int32_t exactly
+    let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
     return Int32(trimmed)
 }
 
-// --- Metrics ---
 private struct BridgeMetrics: Encodable {
     let active: Int
     let cache: Int
@@ -239,7 +241,6 @@ private struct BridgeMetrics: Encodable {
 public func bridge_metrics() -> UnsafeMutablePointer<CChar>? {
     let snapshot = Memory.snapshot()
     let metrics = BridgeMetrics(active: snapshot.activeMemory,cache: snapshot.cacheMemory,peak: snapshot.peakMemory,memoryLimit: Memory.memoryLimit, cacheLimit: Memory.cacheLimit)
-
     guard let jsonData = try? JSONEncoder().encode(metrics),
           let jsonStr = String(data: jsonData, encoding: .utf8) else { return nil }
     return strdup(jsonStr)
@@ -284,7 +285,6 @@ public func bridge_model_evaluate_task(
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
     let configObj = parseConfig(String(cString: configJson))
-
     let taskContainer = TaskContainer()
 
     taskContainer.task = Task { [container, cacheContainer, localCache] in
@@ -301,8 +301,6 @@ public func bridge_model_evaluate_task(
             parameters.quantizedKVStart = activeStart
 
             let bSize = Int(configObj.batchSize ?? 1)
-
-            // PREFILL OPTIMIZATION: Prepare with batchSize 1 to save O(B * N) computation overhead
             let singleBatchTokens = MLXArray(tokens).reshaped(1, tokens.count)
             let input = LMInput(tokens: singleBatchTokens)
 
@@ -314,35 +312,27 @@ public func bridge_model_evaluate_task(
 
             switch try container.context.model.prepare(input, cache: caches!, windowSize: parameters.prefillStepSize) {
             case .tokens(let outTokens):
-                let result = container.context.model(
-                    outTokens,
-                    cache: caches!.isEmpty ? nil : caches!,
-                    state: nil
-                )
-                eval(result.logits)
+                // SAFETY GUARD: Never pass an empty array to the model graph!
+                if outTokens.tokens.size > 0 {
+                    let result = container.context.model(
+                        outTokens,
+                        cache: caches!.isEmpty ? nil : caches!,
+                        state: nil
+                    )
+                    eval(result.logits)
+                } else {
+                    // Fully consumed by chunking
+                    eval(caches!.map { $0.state })
+                }
 
             case .logits(let result):
                 eval(result.logits)
             }
 
-            maybeQuantizeKVCache(
-                cache: &caches!,
-                kvBits: activeKvBits,
-                kvGroupSize: activeGroupSize,
-                quantizedKVStart: activeStart
-            )
+            // Centralized Quantization (Done ONCE, efficiently!)
+            maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
 
-            // BROADCAST OPTIMIZATION: Expand the finalized single-batch cache context outwards physically into N identically tracking outputs
-            if bSize > 1 {
-                for i in 0..<caches!.count {
-                    let currentState = caches![i].state
-                    caches![i].state = currentState.map { array in
-                        MLX.concatenated(Array(repeating: array, count: bSize), axis: 0)
-                    }
-                    eval(caches![i].state) // Realize on Metal to prevent graph explosion
-                }
-            }
-
+            expandCache(&caches!, batchSize: bSize)
             cacheContainer?.caches = caches!
 
             if Task.isCancelled {
@@ -351,11 +341,7 @@ public func bridge_model_evaluate_task(
             }
 
             let duration = Date().timeIntervalSince(startTime)
-            let stats = EvaluateStats(
-                promptTokens: tokens.count,
-                promptTime: duration,
-                promptTokensPerSecond: Double(tokens.count) / duration
-            )
+            let stats = EvaluateStats(promptTokens: tokens.count, promptTime: duration, promptTokensPerSecond: Double(tokens.count) / duration)
 
             if let jsonData = try? JSONEncoder().encode(stats),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
@@ -383,14 +369,12 @@ public func bridge_model_generate_task(
 
     let buffer = UnsafeBufferPointer(start: promptTokens, count: Int(promptLength))
     let tokens = Array(buffer).map { Int($0) }
-
     let configObj = parseConfig(String(cString: configJson))
     let chunkSize = Int(configObj.chunkSize ?? 5)
     let bSize = Int(configObj.batchSize ?? 1)
     let bufferCapacity = chunkSize * bSize
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
-
     var cacheContainer: CacheContainer? = nil
     var localCache: [KVCache]? = nil
     if let ptr = cachePtr {
@@ -402,7 +386,6 @@ public func bridge_model_generate_task(
 
     let task = Task { [container, cacheContainer, localCache] in
         var caches = localCache
-
         let activeKvBits = configObj.kvBits ?? cacheContainer?.kvBits
         let activeGroupSize = configObj.kvGroupSize ?? cacheContainer?.kvGroupSize ?? 64
         let activeStart = configObj.quantizedKVStart ?? cacheContainer?.quantizedKVStart ?? 0
@@ -420,8 +403,6 @@ public func bridge_model_generate_task(
         var wasCancelled = false
 
         do {
-            // STEP 1: INITIALIZE PROMPT WITH batchSize: 1
-            // By avoiding homogeneous batching during prefill, we save O(B * N) redundant computations across the entire context window
             let singleBatchTokens = MLXArray(tokens).reshaped(1, tokens.count)
             let input = LMInput(tokens: singleBatchTokens)
 
@@ -435,50 +416,44 @@ public func bridge_model_generate_task(
             var state: LMOutput.State? = nil
 
             func convertToToken(logits: MLXArray, processor: inout LogitProcessor?, sampler: LogitSampler) -> MLXArray {
+                // SAFETY GUARD: Prevent crash on empty arrays!
+                guard logits.size > 0 else { return MLXArray([0]).reshaped(1, 1) }
+
                 var l = logits[0..., -1, 0...]
                 l = processor?.process(logits: l) ?? l
                 let t = sampler.sample(logits: l)
                 processor?.didSample(token: t)
-                // Force to strictly [B, 1] using variadic arguments to avoid Int32 compiler panic
-                return t.ndim == 1 ? t.reshaped(t.shape[0], 1) : t
+                return t.ndim == 1 && t.size > 0 ? t.reshaped(t.shape[0], 1) : t
             }
 
             let prefillStart = Date.timeIntervalSinceReferenceDate
             processor?.prompt(input.text.tokens)
 
-            // STEP 2: PREFILL WITH batchSize: 1
             switch try container.context.model.prepare(input, cache: caches!, windowSize: params.prefillStepSize) {
               case .tokens(let outTokens):
-                let result = container.context.model(outTokens, cache: caches!.isEmpty ? nil : caches!, state: state)
-                state = result.state
-                let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
-                y = .init(tokens: token)
+                // SAFETY GUARD
+                if outTokens.tokens.size > 0 {
+                    let result = container.context.model(outTokens, cache: caches!.isEmpty ? nil : caches!, state: state)
+                    state = result.state
+                    let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                    y = .init(tokens: token)
+                } else {
+                    // Fallback to a dummy safe tensor to prevent 0-length crash in the generation loop
+                    y = .init(tokens: MLXArray([tokens.last ?? 0]).reshaped(1, 1))
+                }
               case .logits(let result):
                 state = result.state
                 let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
                 y = .init(tokens: token)
             }
 
-            // Force evaluation to ensure prefill logic finishes physically before duplicating or quantizing cache internals
             eval(y.tokens)
-
-            // STEP 3: QUANTIZE
-            // Centralized quantize + Metal pipeline saturation
             maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+            expandCache(&caches!, batchSize: bSize)
 
-            // STEP 4: BROADCAST CACHE AND OUTPUT FOR BATCH_SIZE: N
-            // Physically expand the single cache state outputs outward into multiple discrete batch channels
             if bSize > 1 {
-                for i in 0..<caches!.count {
-                    let currentState = caches![i].state
-                    caches![i].state = currentState.map { array in
-                        MLX.concatenated(Array(repeating: array, count: bSize), axis: 0)
-                    }
-                    eval(caches![i].state) // Realize on Metal to prevent massive graph generation during the step logic loop
-                }
-
-                // Align token generator logic to match new expanded batch boundary size
                 y = .init(tokens: MLX.concatenated(Array(repeating: y.tokens, count: bSize), axis: 0))
+                eval(y.tokens)
             }
 
             MLX.asyncEval(y.tokens)
@@ -490,7 +465,6 @@ public func bridge_model_generate_task(
 
             let stopTokenIds = compileStopTokens(context: container.context, config: configObj)
             var stopReason = "stop"
-
             var isDone = [Bool](repeating: false, count: bSize)
             var completedCount = 0
 
@@ -502,8 +476,6 @@ public func bridge_model_generate_task(
                 }
 
                 cacheContainer?.caches = caches!
-
-                // Unpack multi-dimensional array directly to native C flat array buffer
                 let currentTokens = y.tokens.asArray(Int32.self)
 
                 if promptTime == 0 {
@@ -517,7 +489,7 @@ public func bridge_model_generate_task(
                         if stopTokenIds.contains(tokenId) {
                             isDone[i] = true
                             completedCount += 1
-                            tokenBuffer.append(-1) // Pad natively
+                            tokenBuffer.append(-1)
                         } else {
                             tokenBuffer.append(Int32(tokenId))
                         }
@@ -535,17 +507,13 @@ public func bridge_model_generate_task(
                     tokenBuffer.removeAll(keepingCapacity: true)
                 }
 
-                if completedCount == bSize {
-                    break
-                }
-
+                if completedCount == bSize { break }
                 if let maxT = params.maxTokens, stepCount >= maxT {
                     stopReason = "length"
                     break
                 }
 
                 let result = container.context.model(y, cache: caches!.isEmpty ? nil : caches!, state: state)
-
                 state = result.state
                 maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
 
@@ -556,7 +524,6 @@ public func bridge_model_generate_task(
             }
 
             cacheContainer?.caches = caches!
-
             if Task.isCancelled { wasCancelled = true }
             Stream().synchronize()
 
@@ -564,15 +531,7 @@ public func bridge_model_generate_task(
             let finalPromptTime = promptTime + promptPrefillTime
             let totalTokens = stepCount * bSize
 
-            finalStats = GenerateStats(
-                promptTokens: tokens.count,
-                generatedTokens: totalTokens,
-                promptTime: finalPromptTime,
-                generateTime: generateTime,
-                promptTokensPerSecond: finalPromptTime > 0 ? Double(tokens.count) / finalPromptTime : 0.0,
-                tokensPerSecond: generateTime > 0 ? Double(totalTokens) / generateTime : 0.0,
-                stopReason: stopReason
-            )
+            finalStats = GenerateStats(promptTokens: tokens.count, generatedTokens: totalTokens, promptTime: finalPromptTime, generateTime: generateTime, promptTokensPerSecond: finalPromptTime > 0 ? Double(tokens.count) / finalPromptTime : 0.0, tokensPerSecond: generateTime > 0 ? Double(totalTokens) / generateTime : 0.0, stopReason: stopReason)
 
         } catch {
             wasCancelled = error is CancellationError
@@ -580,31 +539,18 @@ public func bridge_model_generate_task(
         }
 
         if !tokenBuffer.isEmpty {
-            tokenBuffer.withUnsafeBufferPointer { ptr in
-                callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
-            }
+            tokenBuffer.withUnsafeBufferPointer { ptr in callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil) }
         }
 
         if wasCancelled {
-            "Generation Cancelled".withCString { cStr in
-                callback(context, nil, 0, true, true, cStr)
-            }
+            "Generation Cancelled".withCString { cStr in callback(context, nil, 0, true, true, cStr) }
         } else if let errorStr = finalErrorStr {
-            errorStr.withCString { cStr in
-                callback(context, nil, 0, true, true, cStr)
-            }
+            errorStr.withCString { cStr in callback(context, nil, 0, true, true, cStr) }
         } else if let stats = finalStats {
-            if let jsonData = try? JSONEncoder().encode(stats),
-               let jsonStr = String(data: jsonData, encoding: .utf8) {
-                jsonStr.withCString { cStr in
-                    callback(context, nil, 0, true, false, cStr)
-                }
-            } else {
-                callback(context, nil, 0, true, false, nil)
-            }
-        } else {
-            callback(context, nil, 0, true, false, nil)
-        }
+            if let jsonData = try? JSONEncoder().encode(stats), let jsonStr = String(data: jsonData, encoding: .utf8) {
+                jsonStr.withCString { cStr in callback(context, nil, 0, true, false, cStr) }
+            } else { callback(context, nil, 0, true, false, nil) }
+        } else { callback(context, nil, 0, true, false, nil) }
     }
 
     taskContainer.task = task
