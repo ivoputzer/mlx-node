@@ -25,6 +25,7 @@ struct BridgeGenerateConfig: Decodable {
     // custom configuration
     var batchSize: Int?
     var chunkSize: Int?
+    var stopTokenIds: [Int]?
 
     func toGenerateParameters() -> GenerateParameters {
         return GenerateParameters(
@@ -54,6 +55,23 @@ private func parseConfig(_ jsonString: String) -> BridgeGenerateConfig {
         return BridgeGenerateConfig()
     }
     return config
+}
+
+private func compileStopTokens(context: ModelContext, config: BridgeGenerateConfig) -> Set<Int> {
+    var stopTokenIds = context.configuration.eosTokenIds
+
+    if let tokenizerEOS = context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
+    if let unknownTokenId = context.tokenizer.unknownTokenId { stopTokenIds.insert(unknownTokenId) }
+
+    for token in context.configuration.extraEOSTokens {
+        if let id = context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
+    }
+
+    if let customStopIds = config.stopTokenIds {
+        stopTokenIds.formUnion(customStopIds)
+    }
+
+    return stopTokenIds
 }
 
 // --- 2. The Null Tokenizer ---
@@ -437,13 +455,7 @@ public func bridge_model_generate_task(
             var promptTime: TimeInterval = 0
             var stepCount = 0
 
-            var stopTokenIds = container.context.configuration.eosTokenIds
-            if let tokenizerEOS = container.context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
-            for token in container.context.configuration.extraEOSTokens {
-                if let id = container.context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
-            }
-
-            let unknownTokenId = container.context.tokenizer.unknownTokenId ?? -1
+            let stopTokenIds = compileStopTokens(context: container.context, config: configObj)
             var stopReason = "stop"
 
             var isDone = [Bool](repeating: false, count: bSize)
@@ -469,7 +481,7 @@ public func bridge_model_generate_task(
                 for i in 0..<bSize {
                     if !isDone[i] {
                         let tokenId = Int(currentTokens[i])
-                        if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
+                        if stopTokenIds.contains(tokenId) {
                             isDone[i] = true
                             completedCount += 1
                             tokenBuffer.append(-1) // Pad natively

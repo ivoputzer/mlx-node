@@ -16,7 +16,7 @@ function parseSafe (json, fallback = null) {
 
 function configFrom (config) {
   if (config.chunkSize > 2147483647) throw new Error('ChunkSize exceeds INT32_MAX')
-  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['batchSize', 'chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
+  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['stopTokenIds', 'batchSize', 'chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
 }
 
 // CLASSES (this will be moved to mlx-node later, so that we can share them with mlx-cpp)
@@ -244,7 +244,7 @@ export class MLXCache extends MLXTarget {
 }
 
 export class MLXModel extends MLXTarget {
-  static MODEL_CONFIG_KEYS = ['maxTokens', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize']
+  static MODEL_CONFIG_KEYS = ['stopTokenIds', 'maxTokens', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize']
 
   static async fromPath (path) {
     const { promise, resolve, reject } = Promise.withResolvers()
