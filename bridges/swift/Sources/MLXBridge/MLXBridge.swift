@@ -219,7 +219,6 @@ public func bridge_cache_load(path: UnsafePointer<CChar>, context: UnsafeMutable
     }
 }
 
-
 @_cdecl("bridge_cache_trim")
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
     let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
@@ -302,9 +301,10 @@ public func bridge_model_evaluate_task(
             parameters.quantizedKVStart = activeStart
 
             let bSize = Int(configObj.batchSize ?? 1)
-            let flatTokens = Array(repeating: tokens, count: bSize).flatMap { $0 }
-            let batchedTokens = MLXArray(flatTokens).reshaped(bSize, tokens.count)
-            let input = LMInput(tokens: batchedTokens)
+
+            // PREFILL OPTIMIZATION: Prepare with batchSize 1 to save O(B * N) computation overhead
+            let singleBatchTokens = MLXArray(tokens).reshaped(1, tokens.count)
+            let input = LMInput(tokens: singleBatchTokens)
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: parameters)
@@ -331,6 +331,17 @@ public func bridge_model_evaluate_task(
                 kvGroupSize: activeGroupSize,
                 quantizedKVStart: activeStart
             )
+
+            // BROADCAST OPTIMIZATION: Expand the finalized single-batch cache context outwards physically into N identically tracking outputs
+            if bSize > 1 {
+                for i in 0..<caches!.count {
+                    let currentState = caches![i].state
+                    caches![i].state = currentState.map { array in
+                        MLX.concatenated(Array(repeating: array, count: bSize), axis: 0)
+                    }
+                    eval(caches![i].state) // Realize on Metal to prevent graph explosion
+                }
+            }
 
             cacheContainer?.caches = caches!
 
@@ -409,9 +420,10 @@ public func bridge_model_generate_task(
         var wasCancelled = false
 
         do {
-            let flatTokens = Array(repeating: tokens, count: bSize).flatMap { $0 }
-            let batchedTokens = MLXArray(flatTokens).reshaped(bSize, tokens.count)
-            let input = LMInput(tokens: batchedTokens)
+            // STEP 1: INITIALIZE PROMPT WITH batchSize: 1
+            // By avoiding homogeneous batching during prefill, we save O(B * N) redundant computations across the entire context window
+            let singleBatchTokens = MLXArray(tokens).reshaped(1, tokens.count)
+            let input = LMInput(tokens: singleBatchTokens)
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: params)
@@ -434,6 +446,7 @@ public func bridge_model_generate_task(
             let prefillStart = Date.timeIntervalSinceReferenceDate
             processor?.prompt(input.text.tokens)
 
+            // STEP 2: PREFILL WITH batchSize: 1
             switch try container.context.model.prepare(input, cache: caches!, windowSize: params.prefillStepSize) {
               case .tokens(let outTokens):
                 let result = container.context.model(outTokens, cache: caches!.isEmpty ? nil : caches!, state: state)
@@ -446,8 +459,28 @@ public func bridge_model_generate_task(
                 y = .init(tokens: token)
             }
 
+            // Force evaluation to ensure prefill logic finishes physically before duplicating or quantizing cache internals
+            eval(y.tokens)
+
+            // STEP 3: QUANTIZE
             // Centralized quantize + Metal pipeline saturation
             maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+
+            // STEP 4: BROADCAST CACHE AND OUTPUT FOR BATCH_SIZE: N
+            // Physically expand the single cache state outputs outward into multiple discrete batch channels
+            if bSize > 1 {
+                for i in 0..<caches!.count {
+                    let currentState = caches![i].state
+                    caches![i].state = currentState.map { array in
+                        MLX.concatenated(Array(repeating: array, count: bSize), axis: 0)
+                    }
+                    eval(caches![i].state) // Realize on Metal to prevent massive graph generation during the step logic loop
+                }
+
+                // Align token generator logic to match new expanded batch boundary size
+                y = .init(tokens: MLX.concatenated(Array(repeating: y.tokens, count: bSize), axis: 0))
+            }
+
             MLX.asyncEval(y.tokens)
 
             let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
