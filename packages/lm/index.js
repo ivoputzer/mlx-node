@@ -183,17 +183,15 @@ export async function loadTokenizer (path, { Tokenizer } = tokenizers) {
 }
 
 export async function loadTemplate (path, { Template } = jinja) {
+  // todo: maybe check if path is a directory or a file, if it's a file we might load the file directly?
   const tokenizerConfigPath = join(path, 'tokenizer_config.json')
   const templatePath = join(path, 'chat_template.jinja')
-
-  const [tokenizerFile, tokenizerConfigFile] = await Promise.all([
-    readFile(templatePath, 'utf8'),
-    readFile(tokenizerConfigPath, 'utf8')
-  ])
-
-  const tokenizerConfigJson = JSON.parse(tokenizerConfigFile)
-
-  return new Template(tokenizerConfigJson.chat_template ?? tokenizerFile)
+  try {
+    return new Template(await readFile(templatePath, 'utf8'))
+  } catch {
+    // this is just a lazy fallback if there's a template it should be there and we shouldn't even have to read this file (again)
+    return new Template(JSON.parse(await readFile(tokenizerConfigPath, 'utf8'))?.chat_template)
+  }
 }
 
 export async function loadOptions (path) {
