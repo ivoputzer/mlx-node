@@ -167,6 +167,20 @@ class AbortError extends Error {
   }
 }
 
+export function stopTokenIdsFrom (tokenizer) {
+  const stopTokens = new Set()
+
+  for (const [key, value] of Object.entries(tokenizer.config)) {
+    if (key.includes('eos_token') || key.includes('eot_token') || key.includes('pad_token')) {
+      if (tokenizer.model.tokens_to_ids.has(value)) {
+        stopTokens.add(tokenizer.token_to_id(value))
+      }
+    }
+  }
+
+  return Array.from(stopTokens)
+}
+
 export async function loadTokenizer (path, { Tokenizer } = tokenizers) {
   const tokenizerPath = join(path, 'tokenizer.json')
   const tokenizerConfigPath = join(path, 'tokenizer_config.json')
@@ -225,15 +239,51 @@ export async function createCache (model) {
 
 // CLASSES
 
-export class MLXResource {}
+export class Model {
+  #tokenizer
+  #template
 
-export class MLXTarget extends MLXResource {
-  get available () {
-    return this.ref !== null
-  }
+  // static async load (path, tokenizer, template) {
+  //   const ref = await mlx.loadModel(path)
+  //   return new MLXModel(ref, tokenizer, template)
+  // }
+
+  // constructor (ref, tokenizer, template) {
+  //   super(ref)
+
+  //   this.#tokenizer = tokenizer
+  //   this.#template = template
+  // }
+
+  // // this has nothing to do with mlx
+  // encode (prompt, options = {}, { Template } = jinja) {
+  //   if (typeof prompt === 'string') {
+  //     return this.#tokenizer.encode(prompt, { add_special_tokens: true, ...options })
+  //   } else {
+  //     return options?.template?.length
+  //       ? this.#tokenizer.encode(new Template(options.template).render(prompt), { add_special_tokens: false, ...options })
+  //       : this.#tokenizer.encode(this.#template.render({ add_generation_prompt: true, ...prompt }), { add_special_tokens: false, ...options })
+  //   }
+  // }
+
+  // decode (tokens, options = {}) {
+  //   return this.#tokenizer.decode(tokens, options)
+  // }
+
+  // generate (tokens, options) {
+  //   /* returns a MLXStream */
+  //   return mlx.generate(this.ref, null, tokens, options)
+  // }
+
+  // abort () {
+  //   if (!this.available) return
+  //   return mlx.abort(this.ref)
+  // }
 }
 
-export class MLXCache extends MLXTarget {
+export class Cache {
+  #model
+
   // async save (path) {
   //   if (!this.available) throw new Error('Cannot save disposed cache')
   //   try {
@@ -260,66 +310,29 @@ export class MLXCache extends MLXTarget {
   //   return new MLXCache(id)
   // }
 
-  static from (model, options = {}) {
-    const id = mlx.cacheCreate(model.id, JSON.stringify(options))
-    return new MLXCache(id)
-  }
+  // static from (model, options = {}) {
+  //   const id = mlx.cacheCreate(model.id, JSON.stringify(options))
+  //   return new MLXCache(id)
+  // }
 
-  save (path) {
-    if (!this.available) throw new Error('Cache unavailable')
-    return mlx.cacheSave(this.id, path) // throws message:{from swift} code: MLX_SAVE_ERROR
-  }
+  // save (path) {
+  //   if (!this.available) throw new Error('Cache unavailable')
+  //   return mlx.cacheSave(this.id, path) // throws message:{from swift} code: MLX_SAVE_ERROR
+  // }
 
-  trim (numTokens) {
-    if (!this.available) throw new Error('Cache unavailable')
-    return mlx.cacheTrim(this.id, numTokens)
-  }
+  // trim (numTokens) {
+  //   if (!this.available) throw new Error('Cache unavailable')
+  //   return mlx.cacheTrim(this.id, numTokens)
+  // }
 
-  clone () {
-    if (!this.available) throw new Error('Cache unavailable')
-    const id = mlx.cacheClone(this.id)
-    return new MLXCache(id)
-  }
+  // clone () {
+  //   if (!this.available) throw new Error('Cache unavailable')
+  //   const id = mlx.cacheClone(this.id)
+  //   return new MLXCache(id)
+  // }
 }
 
-export class MLXModel extends MLXTarget {
-  #tokenizer
-  #template
-
-  static async load (path, tokenizer, template) {
-    const ref = await mlx.loadModel(path)
-    return new MLXModel(ref, tokenizer, template)
-  }
-
-  constructor (ref, tokenizer, template) {
-    super(ref)
-
-    this.#tokenizer = tokenizer
-    this.#template = template
-  }
-
-  // this has nothing to do with mlx
-  encode (prompt, options = {}, { Template } = jinja) {
-    if (typeof prompt === 'string') {
-      return this.#tokenizer.encode(prompt, { add_special_tokens: true, ...options })
-    } else {
-      return options?.template?.length
-        ? this.#tokenizer.encode(new Template(options.template).render(prompt), { add_special_tokens: false, ...options })
-        : this.#tokenizer.encode(this.#template.render({ add_generation_prompt: true, ...prompt }), { add_special_tokens: false, ...options })
-    }
-  }
-
-  decode (tokens, options = {}) {
-    return this.#tokenizer.decode(tokens, options)
-  }
-
-  generate (tokens, options) {
-    /* returns a MLXStream */
-    return mlx.generate(this.ref, null, tokens, options)
-  }
-
-  // abort () {
-  //   if (!this.available) return
-  //   return mlx.abort(this.ref)
-  // }
+export class Chat {
+  #model
+  #cache
 }
