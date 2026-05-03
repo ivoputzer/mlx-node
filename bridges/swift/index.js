@@ -188,9 +188,9 @@ export class MLXTarget extends MLXResource {
 export class MLXCache extends MLXTarget {
   static CACHE_CONFIG_KEYS = ['maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart']
 
-  static async fromPath (path) { // Load from Disk
+  static async fromPath (path, model) { // Load from Disk
     const { promise, resolve, reject } = Promise.withResolvers()
-    mlx.loadCache(path, (err, ref) => err ? reject(err) : resolve(new MLXCache(ref))) // c should throw: Error {message: '<from swift>' code: 'mlx_load_error'}
+    mlx.loadCache(path, (err, ref) => err ? reject(err) : resolve(new MLXCache(ref, model))) // c should throw: Error {message: '<from swift>' code: 'mlx_load_error'}
     return promise
   }
 
