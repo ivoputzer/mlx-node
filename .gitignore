@@ -1,5 +1,7 @@
-.vscode/
 .DS_Store
+
+.vscode/
+.trash/
 
 node_modules/
 todo/
