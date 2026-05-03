@@ -16,7 +16,7 @@ function parseSafe (json, fallback = null) {
 
 function configFrom (config) {
   if (config.chunkSize > 2147483647) throw new Error('ChunkSize exceeds INT32_MAX')
-  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
+  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['batchSize', 'chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
 }
 
 // CLASSES (this will be moved to mlx-node later, so that we can share them with mlx-cpp)
@@ -78,12 +78,17 @@ export class MLXGenerate extends MLXTask {
   #queue = []
   #wakeup = () => {} // noop
 
-  constructor (model, cache, tokens, options = {}) {
+  #batchSize = 1
+  #chunkSize = 5
+
+  constructor (model, cache, tokens, options = { chunkSize: 5, batchSize: 1 }) {
     super(
       mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, tokens, done, json) => {
         this.#push({ error, tokens, done, json })
       })
     )
+    this.#batchSize = options?.batchSize ?? 1
+    this.#chunkSize = options?.chunkSize ?? 5
   }
 
   #push (event) {
@@ -102,7 +107,18 @@ export class MLXGenerate extends MLXTask {
         for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
           if (error) throw error
           if (done) return parseSafe(json)
-          if (tokens) yield * tokens
+          if (tokens) {
+            // Replicate the 'yield *' behavior:
+            // Unpack the C flat buffer into discrete ticks (time-steps)
+            // Each yield represents ONE tick containing an array of tokens (one per sequence).
+            yield * (function * (buffer, batchSize) {
+              const ticks = buffer.length / batchSize
+              for (let i = 0; i < ticks; i++) {
+                // Slice exactly 1 time-step across all sequences
+                yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
+              }
+            })(tokens, this.#batchSize)
+          }
         }
       }
     } finally {

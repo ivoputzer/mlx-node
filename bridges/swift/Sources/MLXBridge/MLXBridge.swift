@@ -21,6 +21,9 @@ struct BridgeGenerateConfig: Decodable {
     var frequencyPenalty: Float?
     var frequencyContextSize: Int?
     var prefillStepSize: Int?
+
+    // custom configuration
+    var batchSize: Int?
     var chunkSize: Int?
 
     func toGenerateParameters() -> GenerateParameters {
@@ -280,7 +283,10 @@ public func bridge_model_evaluate_task(
             parameters.kvGroupSize = activeGroupSize
             parameters.quantizedKVStart = activeStart
 
-            let input = LMInput(tokens: MLXArray(tokens))
+            let bSize = Int(configObj.batchSize ?? 1)
+            let flatTokens = Array(repeating: tokens, count: bSize).flatMap { $0 }
+            let batchedTokens = MLXArray(flatTokens).reshaped(bSize, tokens.count)
+            let input = LMInput(tokens: batchedTokens)
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: parameters)
@@ -291,7 +297,7 @@ public func bridge_model_evaluate_task(
             switch try container.context.model.prepare(input, cache: caches!, windowSize: parameters.prefillStepSize) {
             case .tokens(let outTokens):
                 let result = container.context.model(
-                    outTokens[text: .newAxis],
+                    outTokens,
                     cache: caches!.isEmpty ? nil : caches!,
                     state: nil
                 )
@@ -301,7 +307,6 @@ public func bridge_model_evaluate_task(
                 eval(result.logits)
             }
 
-            // Manually quantize safely AFTER prefill
             maybeQuantizeKVCache(
                 cache: &caches!,
                 kvBits: activeKvBits,
@@ -352,6 +357,8 @@ public func bridge_model_generate_task(
 
     let configObj = parseConfig(String(cString: configJson))
     let chunkSize = Int(configObj.chunkSize ?? 5)
+    let bSize = Int(configObj.batchSize ?? 1)
+    let bufferCapacity = chunkSize * bSize
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
 
@@ -377,14 +384,16 @@ public func bridge_model_generate_task(
         params.quantizedKVStart = activeStart
 
         var tokenBuffer = [Int32]()
-        tokenBuffer.reserveCapacity(chunkSize)
+        tokenBuffer.reserveCapacity(bufferCapacity)
 
         var finalStats: GenerateStats? = nil
         var finalErrorStr: String? = nil
         var wasCancelled = false
 
         do {
-            let input = LMInput(tokens: MLXArray(tokens))
+            let flatTokens = Array(repeating: tokens, count: bSize).flatMap { $0 }
+            let batchedTokens = MLXArray(flatTokens).reshaped(bSize, tokens.count)
+            let input = LMInput(tokens: batchedTokens)
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: params)
@@ -400,36 +409,35 @@ public func bridge_model_generate_task(
                 l = processor?.process(logits: l) ?? l
                 let t = sampler.sample(logits: l)
                 processor?.didSample(token: t)
-                return t
+                // Force to strictly [B, 1] using variadic arguments to avoid Int32 compiler panic
+                return t.ndim == 1 ? t.reshaped(t.shape[0], 1) : t
             }
 
             let prefillStart = Date.timeIntervalSinceReferenceDate
-
             processor?.prompt(input.text.tokens)
 
             switch try container.context.model.prepare(input, cache: caches!, windowSize: params.prefillStepSize) {
               case .tokens(let outTokens):
-                let result = container.context.model(outTokens[text: .newAxis], cache: caches!.isEmpty ? nil : caches!, state: state)
+                let result = container.context.model(outTokens, cache: caches!.isEmpty ? nil : caches!, state: state)
                 state = result.state
-                maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
                 let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
                 y = .init(tokens: token)
-                MLX.asyncEval(y.tokens)
               case .logits(let result):
                 state = result.state
                 let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
                 y = .init(tokens: token)
-                MLX.asyncEval(y.tokens)
             }
 
-            let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+            // Centralized quantize + Metal pipeline saturation
+            maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+            MLX.asyncEval(y.tokens)
 
+            let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
-            var tokenCount = 0
+            var stepCount = 0
 
             var stopTokenIds = container.context.configuration.eosTokenIds
-
             if let tokenizerEOS = container.context.tokenizer.eosTokenId { stopTokenIds.insert(tokenizerEOS) }
             for token in container.context.configuration.extraEOSTokens {
                 if let id = container.context.tokenizer.convertTokenToId(token) { stopTokenIds.insert(id) }
@@ -438,6 +446,9 @@ public func bridge_model_generate_task(
             let unknownTokenId = container.context.tokenizer.unknownTokenId ?? -1
             var stopReason = "stop"
 
+            var isDone = [Bool](repeating: false, count: bSize)
+            var completedCount = 0
+
             while true {
                 if Task.isCancelled {
                     wasCancelled = true
@@ -445,36 +456,50 @@ public func bridge_model_generate_task(
                     break
                 }
 
-                // CONTINUOUS SYNC: Ensure the JS container ALWAYS holds the exact array instance currently in VRAM
                 cacheContainer?.caches = caches!
 
-                let currentTokenId = y.tokens.item(Int.self)
+                // Unpack multi-dimensional array directly to native C flat array buffer
+                let currentTokens = y.tokens.asArray(Int32.self)
 
                 if promptTime == 0 {
                     promptTime = Date.timeIntervalSinceReferenceDate - start
                     start = Date.timeIntervalSinceReferenceDate
                 }
 
-                tokenBuffer.append(Int32(currentTokenId))
-                tokenCount += 1
+                for i in 0..<bSize {
+                    if !isDone[i] {
+                        let tokenId = Int(currentTokens[i])
+                        if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
+                            isDone[i] = true
+                            completedCount += 1
+                            tokenBuffer.append(-1) // Pad natively
+                        } else {
+                            tokenBuffer.append(Int32(tokenId))
+                        }
+                    } else {
+                        tokenBuffer.append(-1)
+                    }
+                }
 
-                if tokenBuffer.count >= chunkSize {
+                stepCount += 1
+
+                if tokenBuffer.count >= bufferCapacity {
                     tokenBuffer.withUnsafeBufferPointer { ptr in
                         callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil)
                     }
                     tokenBuffer.removeAll(keepingCapacity: true)
                 }
 
-                if currentTokenId == unknownTokenId || stopTokenIds.contains(currentTokenId) {
+                if completedCount == bSize {
                     break
                 }
 
-                if let maxT = params.maxTokens, tokenCount >= maxT {
+                if let maxT = params.maxTokens, stepCount >= maxT {
                     stopReason = "length"
                     break
                 }
 
-                let result = container.context.model(y[text: .newAxis], cache: caches!.isEmpty ? nil : caches!, state: state)
+                let result = container.context.model(y, cache: caches!.isEmpty ? nil : caches!, state: state)
 
                 state = result.state
                 maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
@@ -488,19 +513,19 @@ public func bridge_model_generate_task(
             cacheContainer?.caches = caches!
 
             if Task.isCancelled { wasCancelled = true }
-
             Stream().synchronize()
 
             let generateTime = Date.timeIntervalSinceReferenceDate - start
             let finalPromptTime = promptTime + promptPrefillTime
+            let totalTokens = stepCount * bSize
 
             finalStats = GenerateStats(
                 promptTokens: tokens.count,
-                generatedTokens: tokenCount,
+                generatedTokens: totalTokens,
                 promptTime: finalPromptTime,
                 generateTime: generateTime,
                 promptTokensPerSecond: finalPromptTime > 0 ? Double(tokens.count) / finalPromptTime : 0.0,
-                tokensPerSecond: generateTime > 0 ? Double(tokenCount) / generateTime : 0.0,
+                tokensPerSecond: generateTime > 0 ? Double(totalTokens) / generateTime : 0.0,
                 stopReason: stopReason
             )
 
