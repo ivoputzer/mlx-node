@@ -229,6 +229,28 @@ public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) ->
     return Int32(trimmed)
 }
 
+@_cdecl("bridge_cache_slice")
+public func bridge_cache_slice(ptr: UnsafeMutableRawPointer, start: Int32, end: Int32) -> UnsafeMutableRawPointer {
+    let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
+
+    let slicedCaches = container.caches.map { cache -> KVCache in
+        var newCache = cache.copy() // FIX: Changed 'let' to 'var'
+
+        newCache.state = newCache.state.map { array in
+            guard array.size > 0, array.shape[0] > 1 else { return array } // Protect B=1
+            let actualEnd = min(Int(end), array.shape[0])
+
+            // FIX: Use .take() instead of MLX.slice
+            let indices = MLXArray((Int32(start)..<Int32(actualEnd)).map { $0 })
+            return array.take(indices, axis: 0)
+        }
+        return newCache
+    }
+
+    let newContainer = CacheContainer(slicedCaches, kvBits: container.kvBits, kvGroupSize: container.kvGroupSize, quantizedKVStart: container.quantizedKVStart)
+    return Unmanaged.passRetained(newContainer).toOpaque()
+}
+
 private struct BridgeMetrics: Encodable {
     let active: Int
     let cache: Int

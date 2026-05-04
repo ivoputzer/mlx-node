@@ -25,6 +25,8 @@ extern void* bridge_cache_clone(void* ptr);
 extern void bridge_cache_save(void* ptr, const char* path, void *context, void (*callback)(void *, bool, void *, const char *));
 extern void bridge_cache_load(const char* path, void *context, void (*callback)(void *, bool, void *, const char *));
 extern int32_t bridge_cache_trim(void* ptr, int32_t num_tokens);
+
+extern void* bridge_cache_slice(void* ptr, int32_t start, int32_t end);
 extern char* bridge_cache_debug(void* ptr);
 
 extern void* bridge_model_generate_task(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void*, const int32_t*, int32_t, bool, bool, const char*));
@@ -447,6 +449,27 @@ napi_value Export_CacheTrim(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value Export_CacheSlice(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value args[3];
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* orig_res;
+  napi_get_value_external(env, args[0], (void**)&orig_res);
+
+  int32_t start, end;
+  napi_get_value_int32(env, args[1], &start);
+  napi_get_value_int32(env, args[2], &end);
+
+  void* sliced_ptr = bridge_cache_slice(orig_res->native_ptr, start, end);
+  NativeResource* new_res = malloc(sizeof(NativeResource));
+  new_res->native_ptr = sliced_ptr;
+  new_res->destructor = bridge_cache_free;
+
+  napi_value js_resource;
+  napi_create_external(env, new_res, GC_FinalizeNativeResource, NULL, &js_resource);
+  return js_resource;
+}
+
 napi_value Export_CacheDebug(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value args[1];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
@@ -631,6 +654,7 @@ napi_value init(napi_env env, napi_value exports) {
       {"saveCache", NULL, Export_CacheSave, NULL, NULL, NULL, napi_default, NULL},
       {"cloneCache", NULL, Export_CacheClone, NULL, NULL, NULL, napi_default, NULL},
       {"trimCache", NULL, Export_CacheTrim, NULL, NULL, NULL, napi_default, NULL},
+      {"sliceCache", NULL, Export_CacheSlice, NULL, NULL, NULL, napi_default, NULL},
       {"debugCache", NULL, Export_CacheDebug, NULL, NULL, NULL, napi_default, NULL},
 
       {"loadModel", NULL, Export_ModelLoad, NULL, NULL, NULL, napi_default, NULL},
