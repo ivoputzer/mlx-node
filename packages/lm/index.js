@@ -157,6 +157,79 @@ export async function * stream (target, prompt, options = {}) {
   }
 }
 
+export async function * streamBatch (target, prompts, options = {}) {
+  if (!Array.isArray(prompts) || prompts.length === 0) throw new Error('Prompts must be a non-empty array')
+  if (!target.available) throw new Error('Target not loaded or disposed already')
+
+  const signal = options?.signal ?? new AbortController().signal
+  if (signal?.aborted) throw new AbortError(signal?.reason)
+
+  // Encode all prompts independently
+  const encodedPrompts = prompts.map(prompt => {
+    const { ids } = target.encode(prompt, { template: options?.template })
+    return new Int32Array(ids)
+  })
+
+  const generate = target.batch(encodedPrompts, options)
+
+  const onAbort = () => generate.abort() // Wait, `batch` doesn't return a task, it returns the generator.
+  // We need to attach abort signal handling
+  signal?.addEventListener('abort', onAbort, { once: true })
+
+  const buffers = prompts.map(() => [])
+  const tokensAccumulator = prompts.map(() => [])
+
+  try {
+    while (true) {
+      const { value, done } = await generate.next()
+
+      if (done) {
+        // Yield the final stats and full text payload
+        yield {
+          done: true,
+          results: value.map((stats, i) => ({
+            text: target.decode(tokensAccumulator[i], { skip_special_tokens: options?.skipSpecialTokens ?? true, clean_up_tokenization_spaces: options?.cleanUpTokenizationSpaces ?? true }),
+            finish: stats?.stopReason || 'stop',
+            tokens: tokensAccumulator[i],
+            stats
+          }))
+        }
+        break
+      } else {
+        // value is an array of tokens, e.g., [token1, token2]
+        const textYields = new Array(prompts.length).fill('')
+
+        for (let i = 0; i < value.length; i++) {
+          const token = value[i]
+          if (token !== -1) {
+            tokensAccumulator[i].push(token)
+            buffers[i].push(token)
+
+            const text = target.decode(buffers[i], { skip_special_tokens: options?.skipSpecialTokens ?? true, clean_up_tokenization_spaces: false })
+            if (!text.endsWith('\uFFFD')) { // Wait for valid unicode characters
+              textYields[i] = text
+              buffers[i].length = 0
+            }
+          }
+        }
+
+        // Only yield if at least one stream produced valid text
+        if (textYields.some(t => t.length > 0)) {
+          yield { text: textYields, done: false }
+        }
+      }
+    }
+  } catch (error) {
+    if (error.message?.includes('Cancelled') || error.message?.includes('Abort')) {
+      yield { done: true, finish: 'abort', results: null }
+      return
+    }
+    throw error
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+  }
+}
+
 // HELPERS
 
 class AbortError extends Error {

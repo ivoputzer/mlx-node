@@ -155,34 +155,68 @@ export class MLXTarget extends MLXResource {
     return new MLXEvaluate(this.model, this.cache, tokens, options)
   }
 
-  // async * batch (promptTokensArray, options = {}) {
-  //   const tasks = promptTokensArray.map(tokens => this.generate(tokens, { ...options, chunkSize: 1, batchSize: 1 }))
-  //   const iterators = tasks.map(task => task[Symbol.asyncIterator]())
-  //   const active = iterators.length
-  //   try {
-  //     while (active > 0) {
-  //       // Wait for 1 tick from all active agents concurrently
-  //       const tickResults = await Promise.all(iterators.map(it => it.next()))
-  //       const tickTokens = []
-  //       for (let i = 0; i < tickResults.length; i++) {
-  //         const res = tickResults[i]
-  //         if (res.done) {
-  //           tickTokens.push(null) // Pad finished tasks
-  //           if (res.value) { /* Handle final stats if needed */ }
-  //         } else {
-  //           // Assume single token yielded because chunkSize is 1
-  //           tickTokens.push(res.value[0])
-  //         }
-  //       }
-  //       // If all returned -1, we are done
-  //       if (tickTokens.every(t => t === -1)) break
-  //       yield tickTokens
-  //     }
-  //   } finally {
-  //     // Ensure all tasks abort if the user breaks the loop
-  //     tasks.forEach(task => task.abort())
-  //   }
-  // }
+  async * batch (promptTokensArrays, options = {}) {
+    if (!this.available) throw new Error('Target unavailable')
+    if (!Array.isArray(promptTokensArrays) || promptTokensArrays.length === 0) {
+      throw new Error('batch() requires an array of prompt token arrays')
+    }
+
+    const activeBatchSize = options.batchSize || 1
+    const isolatedCaches = promptTokensArrays.map(() => this.cache ? this.cache.clone() : null)
+
+    // Force chunkSize to 1 to ensure predictability, but allow any batchSize!
+    const tasks = promptTokensArrays.map((tokens, i) =>
+      new MLXGenerate(this.model, isolatedCaches[i], tokens, { ...options, chunkSize: 1, batchSize: activeBatchSize })
+    )
+
+    const iterators = tasks.map(task => task[Symbol.asyncIterator]())
+    const isDone = new Array(tasks.length).fill(false)
+    let active = tasks.length
+    const finalStats = new Array(tasks.length).fill(null)
+
+    try {
+      while (active > 0) {
+        // Wait for 1 tick from all active streams concurrently
+        const tickResults = await Promise.all(iterators.map(async (it, i) => {
+          if (isDone[i]) return { done: true }
+          return it.next()
+        }))
+
+        const tickTokens = []
+        let allFinishedThisTick = true
+
+        for (let i = 0; i < tickResults.length; i++) {
+          const res = tickResults[i]
+          if (res.done) {
+            if (!isDone[i]) {
+              isDone[i] = true
+              active--
+              finalStats[i] = res.value // Capture final stats
+            }
+            // Pad the output with an array of -1s to match the requested batchSize
+            tickTokens.push(new Array(activeBatchSize).fill(-1))
+          } else {
+            allFinishedThisTick = false
+            // res.value is [[t1, t2]], we extract the inner array
+            tickTokens.push(res.value)
+          }
+        }
+
+        if (allFinishedThisTick) break
+        yield tickTokens
+      }
+
+      // Return the stats AND the caches so the user can continue the conversation!
+      return finalStats.map((stats, i) => ({ stats, cache: isolatedCaches[i] }))
+    } finally {
+      // If active > 0, it means the user 'break'd out of the loop or an error was thrown.
+      // We MUST abort tasks and manually free the caches to prevent massive memory leaks.
+      if (active > 0) {
+        tasks.forEach(task => task.abort())
+        isolatedCaches.forEach(c => c?.dispose())
+      }
+    }
+  }
 }
 
 export class MLXCache extends MLXTarget {
