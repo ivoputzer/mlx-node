@@ -29,6 +29,7 @@ extern int32_t bridge_cache_trim(void* ptr, int32_t num_tokens);
 extern void* bridge_cache_slice(void* ptr, int32_t start, int32_t end);
 extern char* bridge_cache_debug(void* ptr);
 
+extern void* bridge_model_batch_task(void* model_ptr, void* cache_ptr, const int32_t* flat_tokens, int32_t max_len, int32_t batch_size, const char* config_json, void* context, void (*callback)(void*, const int32_t*, int32_t, bool, bool, const char*));
 extern void* bridge_model_generate_task(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void*, const int32_t*, int32_t, bool, bool, const char*));
 extern void* bridge_model_evaluate_task(void* model_ptr, void* cache_ptr, const int32_t* prompt_tokens, int32_t prompt_length, const char* config_json, void* context, void (*callback)(void *, bool, void *, const char *));
 extern void bridge_model_abort_task(void* ptr);
@@ -628,6 +629,58 @@ napi_value Export_SystemClearCache(napi_env env, napi_callback_info info) {
   return undefined;
 }
 
+napi_value Export_ModelBatchTask(napi_env env, napi_callback_info info) {
+  size_t argc = 7; napi_value args[7]; // model, cache, flat_tokens, max_len, batch_size, json, callback
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+  NativeResource* model_res;
+  if (napi_get_value_external(env, args[0], (void**)&model_res) != napi_ok || !model_res || !model_res->native_ptr) {
+    napi_throw_type_error(env, "MLX_ERR", "Model is already unloaded or invalid"); return NULL;
+  }
+
+  void* cache_ptr = NULL;
+  napi_valuetype cache_type;
+  napi_typeof(env, args[1], &cache_type);
+  if (cache_type == napi_external) {
+    NativeResource* cache_res;
+    napi_get_value_external(env, args[1], (void**)&cache_res);
+    if (cache_res) cache_ptr = cache_res->native_ptr;
+  }
+
+  napi_typedarray_type type; size_t length; void* data; size_t byte_offset;
+  napi_get_typedarray_info(env, args[2], &type, &length, &data, NULL, &byte_offset);
+  int32_t* flat_tokens = (int32_t*)((char*)data + byte_offset);
+
+  int32_t max_len;
+  napi_get_value_int32(env, args[3], &max_len);
+
+  int32_t batch_size;
+  napi_get_value_int32(env, args[4], &batch_size);
+
+  size_t json_len;
+  napi_get_value_string_utf8(env, args[5], NULL, 0, &json_len);
+  char* config_json = (char*)malloc(json_len + 1);
+  napi_get_value_string_utf8(env, args[5], config_json, json_len + 1, &json_len);
+
+  napi_value js_callback = args[6];
+  napi_value resource_name;
+  napi_create_string_utf8(env, "MLXModelBatchStream", NAPI_AUTO_LENGTH, &resource_name);
+
+  napi_threadsafe_function tsfn;
+  napi_create_threadsafe_function(env, js_callback, NULL, resource_name, 0, 1, NULL, NULL, NULL, V8_OnStreamEvent, &tsfn);
+
+  void* stream_ptr = bridge_model_batch_task(model_res->native_ptr, cache_ptr, flat_tokens, max_len, batch_size, config_json, (void*)tsfn, Swift_OnStreamEvent);
+  free(config_json);
+
+  NativeResource* stream_res = malloc(sizeof(NativeResource));
+  stream_res->native_ptr = stream_ptr;
+  stream_res->destructor = bridge_model_free_task;
+
+  napi_value js_stream_res;
+  napi_create_external(env, stream_res, GC_FinalizeNativeResource, NULL, &js_stream_res);
+  return js_stream_res;
+}
+
 // ============================================================================
 // MODULE INITIALIZATION
 // ============================================================================
@@ -661,12 +714,13 @@ napi_value init(napi_env env, napi_value exports) {
       {"generateTask", NULL, Export_ModelGenerateTask, NULL, NULL, NULL, napi_default, NULL},
       {"evaluateTask", NULL, Export_ModelEvaluateTask, NULL, NULL, NULL, napi_default, NULL},
       {"abortTask", NULL, Export_ModelAbortTask, NULL, NULL, NULL, napi_default, NULL},
+      {"batchTask", NULL, Export_ModelBatchTask, NULL, NULL, NULL, napi_default, NULL},
 
       {"systemMetrics", NULL, Export_SystemMetrics, NULL, NULL, NULL, napi_default, NULL},
       {"systemClearCache", NULL, Export_SystemClearCache, NULL, NULL, NULL, napi_default, NULL},
   };
 
-  napi_define_properties(env, exports, 13, desc);
+  napi_define_properties(env, exports, 15, desc);
   return exports;
 }
 

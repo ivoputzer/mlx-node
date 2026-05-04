@@ -217,6 +217,31 @@ export class MLXTarget extends MLXResource {
       }
     }
   }
+
+  async * _batch (promptTokensArrays, options = {}) {
+    if (!this.available) throw new Error('Target unavailable')
+    if (!Array.isArray(promptTokensArrays) || promptTokensArrays.length === 0) {
+      throw new Error('batch() requires an array of prompt token arrays')
+    }
+
+    // Usually pad_token_id is in tokenizer.config.pad_token_id,
+    // otherwise fallback to 0 (which is safe for testing)
+    const padTokenId = options.padTokenId ?? 0
+
+    // Convert jagged arrays into a dense flat tensor
+    const { flatTokens, maxLen, batchSize } = createPaddedBatch(promptTokensArrays, padTokenId)
+
+    // Start the single unified C-Task!
+    const generate = new MLXBatch(this.model, this.cache, flatTokens, maxLen, batchSize, options)
+
+    try {
+      for await (const batchTokens of generate) {
+        yield batchTokens
+      }
+    } finally {
+      generate.abort()
+    }
+  }
 }
 
 export class MLXCache extends MLXTarget {
@@ -346,4 +371,76 @@ export class MLXMetrics {
   }
 }
 
+export class MLXBatch extends MLXTask {
+  #queue = []
+  #wakeup = () => {}
+  #batchSize = 1
+
+  constructor (model, cache, flatTokens, maxLen, batchSize, options = {}) {
+    super(
+      mlx.batchTask(model?.ref, cache?.ref, flatTokens, maxLen, batchSize, configFrom(options), (error, tokens, done, json) => {
+        this.#push({ error, tokens, done, json })
+      })
+    )
+    this.#batchSize = batchSize
+  }
+
+  #push (event) {
+    this.#queue.push(event)
+    this.#wakeup()
+  }
+
+  async * [Symbol.asyncIterator] () {
+    try {
+      while (true) {
+        if (this.#queue.length === 0) {
+          const { promise, resolve } = Promise.withResolvers()
+          this.#wakeup = resolve
+          await promise
+        }
+        for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
+          if (error) throw error
+          if (done) return parseSafe(json)
+          if (tokens) {
+            yield * (function * (buffer, batchSize) {
+              const ticks = buffer.length / batchSize
+              for (let i = 0; i < ticks; i++) {
+                yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
+              }
+            })(tokens, this.#batchSize)
+          }
+        }
+      }
+    } finally {
+      this.abort()
+      this.dispose()
+    }
+  }
+}
+
 export default mlx
+
+function createPaddedBatch (promptTokensArrays, padTokenId = 0) {
+  const batchSize = promptTokensArrays.length
+  const maxLen = Math.max(...promptTokensArrays.map(arr => arr.length))
+
+  if (maxLen === 0) throw new Error('Cannot evaluate empty prompts')
+
+  const flatTokens = new Int32Array(batchSize * maxLen)
+
+  for (let i = 0; i < batchSize; i++) {
+    const tokens = promptTokensArrays[i]
+    const padCount = maxLen - tokens.length
+
+    // 1. Left-pad with padTokenId
+    for (let p = 0; p < padCount; p++) {
+      flatTokens[i * maxLen + p] = padTokenId
+    }
+    // 2. Insert actual tokens at the end
+    for (let t = 0; t < tokens.length; t++) {
+      flatTokens[i * maxLen + padCount + t] = tokens[t]
+    }
+  }
+
+  return { flatTokens, maxLen, batchSize }
+}
