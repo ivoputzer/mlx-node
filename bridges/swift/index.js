@@ -232,6 +232,11 @@ export class MLXCache extends MLXTarget {
     return new MLXCache(mlx.cloneCache(this.ref), this.#model)
   }
 
+  slice (start, end) {
+    if (!this.available) throw new Error('Cache unavailable')
+    return new MLXCache(mlx.sliceCache(this.ref, start, end), this.#model)
+  }
+
   get isTrimmable () {
     const { isTrimmable } = this.debug()
     return isTrimmable // This value should be cached

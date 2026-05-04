@@ -393,8 +393,7 @@ public func bridge_model_generate_task(
     let tokens = Array(buffer).map { Int($0) }
     let configObj = parseConfig(String(cString: configJson))
     let chunkSize = Int(configObj.chunkSize ?? 5)
-    let bSize = Int(configObj.batchSize ?? 1)
-    let bufferCapacity = chunkSize * bSize
+    let requestedBSize = Int(configObj.batchSize ?? 1)
 
     let container = Unmanaged<ModelContainer>.fromOpaque(modelPtr).takeUnretainedValue()
     var cacheContainer: CacheContainer? = nil
@@ -417,77 +416,148 @@ public func bridge_model_generate_task(
         params.kvGroupSize = activeGroupSize
         params.quantizedKVStart = activeStart
 
-        var tokenBuffer = [Int32]()
-        tokenBuffer.reserveCapacity(bufferCapacity)
-
         var finalStats: GenerateStats? = nil
         var finalErrorStr: String? = nil
         var wasCancelled = false
 
         do {
-            let singleBatchTokens = MLXArray(tokens).reshaped(1, tokens.count)
-            let input = LMInput(tokens: singleBatchTokens)
+            // 1. DETERMINE CACHE STATE & BATCH SIZES
+            let isFreshCache = caches == nil || (caches!.first?.state.isEmpty ?? true)
+            let currentCacheBSize = isFreshCache ? 1 : (caches!.first?.state.first?.shape[0] ?? 1)
+
+            // If the cache is already B>1, we must lock the requested batch size to match to prevent QKV crashes.
+            let activeBSize = (!isFreshCache && currentCacheBSize > 1) ? currentCacheBSize : requestedBSize
+
+            let bufferCapacity = chunkSize * activeBSize
+            var tokenBuffer = [Int32]()
+            tokenBuffer.reserveCapacity(bufferCapacity)
+
+            // 2. CACHE PRE-EXPANSION (Turn 2 Branching)
+            // If the user passes a B=1 cache but wants to branch out (B>1), we must expand the cache BEFORE prefill!
+            if !isFreshCache && currentCacheBSize == 1 && activeBSize > 1 {
+                expandCache(&caches!, batchSize: activeBSize)
+            }
+
+            // 3. OPTIMAL SHARED PREFILL SETUP
+            // If it's a fresh cache, we prefill at B=1 (fastest), then expand later.
+            // Otherwise, we must match the active cache size.
+            let prefillBSize = isFreshCache ? 1 : activeBSize
+
+            var inputTokens = MLXArray(tokens).reshaped(1, tokens.count)
+            if prefillBSize > 1 {
+                inputTokens = MLX.concatenated(Array(repeating: inputTokens, count: prefillBSize), axis: 0)
+            }
+            let input = LMInput(tokens: inputTokens)
 
             if caches == nil {
                 caches = container.context.model.newCache(parameters: params)
             }
 
-            var processor = params.processor()
             let sampler = params.sampler()
             var y: LMInput.Text
             var state: LMOutput.State? = nil
 
-            func convertToToken(logits: MLXArray, processor: inout LogitProcessor?, sampler: LogitSampler) -> MLXArray {
-                // SAFETY GUARD: Prevent crash on empty arrays!
+            var prefillProcessors = (0..<prefillBSize).map { _ in params.processor() }
+
+            func convertToTokenBatched(logits: MLXArray, processors: inout [LogitProcessor?], bSize: Int) -> MLXArray {
                 guard logits.size > 0 else { return MLXArray([0]).reshaped(1, 1) }
 
-                var l = logits[0..., -1, 0...]
-                l = processor?.process(logits: l) ?? l
+                var l = logits[0..., -1, 0...] // Shape: [B, V]
+
+                // Safety Broadcast: If logits is B=1 but we expect B>1
+                if l.shape[0] == 1 && bSize > 1 {
+                    l = MLX.concatenated(Array(repeating: l, count: bSize), axis: 0)
+                }
+
+                var processedLogits = [MLXArray]()
+                for i in 0..<bSize {
+                    let indexArray = MLXArray([Int32(i)])
+                    var row = l.take(indexArray, axis: 0) // Shape: [1, V]
+                    if let p = processors[i] { row = p.process(logits: row) }
+                    processedLogits.append(row)
+                }
+
+                l = MLX.concatenated(processedLogits, axis: 0)
                 let t = sampler.sample(logits: l)
-                processor?.didSample(token: t)
+
+                let tArray = t.asArray(Int32.self)
+                for i in 0..<bSize {
+                    processors[i]?.didSample(token: MLXArray([tArray[i]]))
+                }
+
                 return t.ndim == 1 && t.size > 0 ? t.reshaped(t.shape[0], 1) : t
             }
 
             let prefillStart = Date.timeIntervalSinceReferenceDate
-            processor?.prompt(input.text.tokens)
+            for i in 0..<prefillBSize {
+                let indexArray = MLXArray([Int32(i)])
+                prefillProcessors[i]?.prompt(inputTokens.take(indexArray, axis: 0))
+            }
 
+            // 4. EXECUTE PREFILL
             switch try container.context.model.prepare(input, cache: caches!, windowSize: params.prefillStepSize) {
               case .tokens(let outTokens):
-                // SAFETY GUARD
                 if outTokens.tokens.size > 0 {
                     let result = container.context.model(outTokens, cache: caches!.isEmpty ? nil : caches!, state: state)
                     state = result.state
-                    let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                    let token = convertToTokenBatched(logits: result.logits, processors: &prefillProcessors, bSize: prefillBSize)
                     y = .init(tokens: token)
                 } else {
-                    // Fallback to a dummy safe tensor to prevent 0-length crash in the generation loop
                     y = .init(tokens: MLXArray([tokens.last ?? 0]).reshaped(1, 1))
+                    if prefillBSize > 1 {
+                        y = .init(tokens: MLX.concatenated(Array(repeating: y.tokens, count: prefillBSize), axis: 0))
+                    }
                 }
               case .logits(let result):
                 state = result.state
-                let token = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                let token = convertToTokenBatched(logits: result.logits, processors: &prefillProcessors, bSize: prefillBSize)
                 y = .init(tokens: token)
             }
 
             eval(y.tokens)
-            maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
-            expandCache(&caches!, batchSize: bSize)
 
-            if bSize > 1 {
-                y = .init(tokens: MLX.concatenated(Array(repeating: y.tokens, count: bSize), axis: 0))
+            // Quantize ONCE after prefill
+            maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
+
+            // 5. CACHE POST-EXPANSION (Turn 1 Branching)
+            // If it was a fresh cache, we prefilled B=1. If the user wants B>1, we expand it now.
+            if isFreshCache && activeBSize > 1 {
+                expandCache(&caches!, batchSize: activeBSize)
+                y = .init(tokens: MLX.concatenated(Array(repeating: y.tokens, count: activeBSize), axis: 0))
                 eval(y.tokens)
             }
 
+            cacheContainer?.caches = caches!
             MLX.asyncEval(y.tokens)
 
             let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+
+            // Pre-empt loop if maxTokens is 0
+            if let maxT = params.maxTokens, maxT == 0 {
+                finalStats = GenerateStats(promptTokens: tokens.count, generatedTokens: 0, promptTime: promptPrefillTime, generateTime: 0, promptTokensPerSecond: promptPrefillTime > 0 ? Double(tokens.count) / promptPrefillTime : 0.0, tokensPerSecond: 0, stopReason: "length")
+                if let jsonData = try? JSONEncoder().encode(finalStats), let jsonStr = String(data: jsonData, encoding: .utf8) {
+                    jsonStr.withCString { cStr in callback(context, nil, 0, true, false, cStr) }
+                } else { callback(context, nil, 0, true, false, nil) }
+                return
+            }
+
+            // 6. SETUP GENERATION PROCESSORS
+            var genProcessors = (0..<activeBSize).map { _ in params.processor() }
+            let yTokensArray = y.tokens.asArray(Int32.self)
+            for i in 0..<activeBSize {
+                let pTokens = MLXArray(tokens).reshaped(1, tokens.count)
+                genProcessors[i]?.prompt(pTokens)
+                genProcessors[i]?.didSample(token: MLXArray([yTokensArray[i]]))
+            }
+
+            // 7. GENERATION LOOP
             var start = Date.timeIntervalSinceReferenceDate
             var promptTime: TimeInterval = 0
             var stepCount = 0
 
             let stopTokenIds = compileStopTokens(context: container.context, config: configObj)
             var stopReason = "stop"
-            var isDone = [Bool](repeating: false, count: bSize)
+            var isDone = [Bool](repeating: false, count: activeBSize)
             var completedCount = 0
 
             while true {
@@ -497,7 +567,6 @@ public func bridge_model_generate_task(
                     break
                 }
 
-                cacheContainer?.caches = caches!
                 let currentTokens = y.tokens.asArray(Int32.self)
 
                 if promptTime == 0 {
@@ -505,7 +574,7 @@ public func bridge_model_generate_task(
                     start = Date.timeIntervalSinceReferenceDate
                 }
 
-                for i in 0..<bSize {
+                for i in 0..<activeBSize {
                     if !isDone[i] {
                         let tokenId = Int(currentTokens[i])
                         if stopTokenIds.contains(tokenId) {
@@ -529,7 +598,7 @@ public func bridge_model_generate_task(
                     tokenBuffer.removeAll(keepingCapacity: true)
                 }
 
-                if completedCount == bSize { break }
+                if completedCount == activeBSize { break }
                 if let maxT = params.maxTokens, stepCount >= maxT {
                     stopReason = "length"
                     break
@@ -537,9 +606,8 @@ public func bridge_model_generate_task(
 
                 let result = container.context.model(y, cache: caches!.isEmpty ? nil : caches!, state: state)
                 state = result.state
-                maybeQuantizeKVCache(cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize, quantizedKVStart: activeStart)
 
-                let nextToken = convertToToken(logits: result.logits, processor: &processor, sampler: sampler)
+                let nextToken = convertToTokenBatched(logits: result.logits, processors: &genProcessors, bSize: activeBSize)
                 y = .init(tokens: nextToken)
 
                 MLX.asyncEval(y.tokens)
@@ -551,17 +619,16 @@ public func bridge_model_generate_task(
 
             let generateTime = Date.timeIntervalSinceReferenceDate - start
             let finalPromptTime = promptTime + promptPrefillTime
-            let totalTokens = stepCount * bSize
+            let totalTokens = stepCount * activeBSize
 
             finalStats = GenerateStats(promptTokens: tokens.count, generatedTokens: totalTokens, promptTime: finalPromptTime, generateTime: generateTime, promptTokensPerSecond: finalPromptTime > 0 ? Double(tokens.count) / finalPromptTime : 0.0, tokensPerSecond: generateTime > 0 ? Double(totalTokens) / generateTime : 0.0, stopReason: stopReason)
 
+            if !tokenBuffer.isEmpty {
+                tokenBuffer.withUnsafeBufferPointer { ptr in callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil) }
+            }
         } catch {
             wasCancelled = error is CancellationError
             if !wasCancelled { finalErrorStr = error.localizedDescription }
-        }
-
-        if !tokenBuffer.isEmpty {
-            tokenBuffer.withUnsafeBufferPointer { ptr in callback(context, ptr.baseAddress, Int32(tokenBuffer.count), false, false, nil) }
         }
 
         if wasCancelled {
