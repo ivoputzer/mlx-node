@@ -7,13 +7,19 @@ export function toStream (asyncIterable) {
 }
 
 export function toWebStream (asyncIterable) {
-  return Readable.toWeb(toStream(asyncIterable))
   return new ReadableStream({
     async start (controller) {
-      for await (const { text } of asyncIterable) {
-        if (text) controller.enqueue(new TextEncoder().encode(text))
+      const encoder = new TextEncoder()
+      try {
+        for await (const { text } of asyncIterable) {
+          if (text) {
+            controller.enqueue(encoder.encode(text))
+          }
+        }
+        controller.close()
+      } catch (error) {
+        controller.error(error)
       }
-      controller.close()
     }
   })
 }

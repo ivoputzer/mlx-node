@@ -2,6 +2,8 @@
   "name": "mlx-agent",
   "version": "0.0.0-draft.1",
   "private": false,
+  "type": "module",
+  "main": "index.js",
   "scripts": {
     "test": "exit 0"
   },
