@@ -267,7 +267,9 @@ export function padTokenFrom (tokenizer) {
   return 0 // Absolute Last Resort: 0 (Usually maps to <unk>, <s>, or <pad> anyway)
 }
 
-export function stopTokenIdsFrom (tokenizer) {
+export const stopTokenIdsFrom = stopTokensFrom // @deprecated
+
+export function stopTokensFrom (tokenizer) {
   const stopTokens = new Set()
 
   for (const [key, value] of Object.entries(tokenizer.config)) {
@@ -326,8 +328,7 @@ export async function loadOptions (path) {
 export async function loadModel (path) {
   const tokenizer = await loadTokenizer(path)
   const template = await loadTemplate(path)
-
-  return MLXModel.load(path, tokenizer, template)
+  return MLXModel.loadFrom(path)
 }
 
 export async function loadCache (path) {
@@ -342,7 +343,6 @@ export async function createCache (model) {
 export class Model {
   #tokenizer
   #template
-
   // static async load (path, tokenizer, template) {
   //   const ref = await mlx.loadModel(path)
   //   return new MLXModel(ref, tokenizer, template)
@@ -432,7 +432,69 @@ export class Cache {
   // }
 }
 
-export class Chat {
-  #model
-  #cache
-}
+// class ChatSession {
+//   #cache
+//   #template
+
+//   #stopToken
+
+//   constructor (cache, tokenizer, template) {
+//     this.#cache = cache
+//     this.#template = template
+//     this.stopToken = tokenizer.config.c
+
+//     // Create the C-pointer cache
+//     this.cache = this.model.createCache()
+
+//     // State trackers
+//     this.isCacheHot = false
+//   }
+
+//   // Helper: Renders ONLY the delta (the new stuff)
+//   _renderDelta (messages, addGenPrompt) {
+//     return this.templateRenderer.render({
+//       messages,
+//       add_generation_prompt: addGenPrompt
+//     })
+//   }
+
+//   async generate (newMessages) {
+//     let promptString = ''
+
+//     if (!this.isCacheHot) {
+//       // SCENARIO 1: COLD CACHE (Turn 1)
+//       // Render the full history including System Prompt
+//       promptString = this._renderDelta(newMessages, true)
+//     } else {
+//       // SCENARIO 2: HOT CACHE (Turn 2+)
+//       // 1. Close the model's mouth from the previous turn
+//       // 2. Render ONLY the new user message
+//       const deltaText = this._renderDelta(newMessages, true)
+//       promptString = this.stopTokenString + deltaText
+//     }
+
+//     // Tokenize ONLY the promptString
+//     const inputTokens = this.model.tokenizer.encode(promptString)
+
+//     // Run the C-Bridge generate task
+//     const response = await this.model.generateTask(inputTokens, this.cache)
+
+//     // Mark cache as hot so the next turn knows what to do!
+//     this.isCacheHot = true
+
+//     return response.text
+//   }
+
+//   async continue (injectedText) {
+//     // SCENARIO 3: ASSISTANT PREFILLING / CONTINUATION
+//     if (!this.isCacheHot) throw new Error('Cannot continue an empty cache!')
+
+//     // Notice we DO NOT prepend the stopTokenString.
+//     // We just feed the raw injected text straight into the open mouth!
+//     const inputTokens = this.model.tokenizer.encode(injectedText)
+
+//     // The model will seamlessly continue from injectedText
+//     const response = await this.model.generateTask(inputTokens, this.cache)
+//     return response.text
+//   }
+// }
