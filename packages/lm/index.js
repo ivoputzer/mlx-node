@@ -243,7 +243,7 @@ class AbortError extends Error {
 export function padTokenFrom (tokenizer) {
   const config = tokenizer.config
   const hasTokenId = tokenizer.model.tokens_to_ids.has.bind(tokenizer.model.tokens_to_ids) // tokenizer.model.tokens_to_ids is a Map()
-  const getTokenId = tokenizer.token_to_id
+  const getTokenId = tokenizer.token_to_id.bind(tokenizer)
 
   // Actual pad token ID
   if (config.pad_token_id !== undefined && config.pad_token_id !== null) {
