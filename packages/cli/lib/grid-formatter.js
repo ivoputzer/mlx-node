@@ -125,14 +125,14 @@ export class IncrementalGridFormatter {
   #lastColWidth
   #colStates
 
-  // Dependency Injection Hooks
-  #cellFormatter
+  #lineFormatter
   #tailFormatter
 
   constructor (batchSize, options = {}) {
     this.#batchSize = batchSize
     this.#tabSize = options.tabSize || 2
-    this.#cellFormatter = options.cellFormatter || ((text) => text)
+    // Format individual wrapped lines to prevent ANSI bleed
+    this.#lineFormatter = options.lineFormatter || ((line) => line)
     this.#tailFormatter = options.tailFormatter || (() => '')
 
     this.#segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
@@ -154,10 +154,15 @@ export class IncrementalGridFormatter {
       if (str.charCodeAt(i) > 127) { asciiOnly = false; break }
     }
     if (asciiOnly) return str.length
+
     let w = 0
     for (const { segment } of this.#segmenter.segment(stripVTControlCharacters(str))) {
       const code = segment.codePointAt(0)
-      if (code >= 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x2B00 && code <= 0x2BFF) || (code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3040 && code <= 0x30FF) || (code >= 0xFF00 && code <= 0xFFEF)) w += 2
+      if (
+        code >= 0x1F000 || (code >= 0x2600 && code <= 0x27BF) ||
+        (code >= 0x2B00 && code <= 0x2BFF) || (code >= 0x4E00 && code <= 0x9FFF) ||
+        (code >= 0x3040 && code <= 0x30FF) || (code >= 0xFF00 && code <= 0xFFEF)
+      ) w += 2
       else w += 1
     }
     return w
@@ -202,9 +207,6 @@ export class IncrementalGridFormatter {
     return lines
   }
 
-  // Exposed for testing
-  getState () { return this.#colStates }
-
   formatGrid (buffers, terminalWidth) {
     const gap = 3
     const colWidth = Math.max(2, Math.floor((terminalWidth - (this.#batchSize - 1) * gap) / this.#batchSize))
@@ -218,10 +220,9 @@ export class IncrementalGridFormatter {
 
     for (let i = 0; i < this.#batchSize; i++) {
       const state = this.#colStates[i]
-      // 1. Run the raw buffer through the user's custom formatter
-      const formattedBuffer = this.#cellFormatter(buffers[i] || '', i, buffers)
+      const buffer = buffers[i] || '' // Prevent undefined
 
-      const unprocessed = formattedBuffer.slice(state.lockedLen)
+      const unprocessed = buffer.slice(state.lockedLen)
 
       if (unprocessed) {
         const parts = unprocessed.split('\n')
@@ -230,17 +231,20 @@ export class IncrementalGridFormatter {
           state.lockedLen += parts[p].length + 1
         }
 
-        // 2. Inject the dynamic "Tail" (Stats/TPS) right in front of the active typing cursor
         const tail = this.#tailFormatter(i, buffers)
         const activeWrapped = this.wrapParagraph(parts[parts.length - 1] + tail, colWidth)
-
         state.currentView = [...state.lockedLines, ...activeWrapped]
       } else if (state.currentView.length === 0) {
-        // If buffer is totally empty, still print the tail
         const tail = this.#tailFormatter(i, buffers)
         state.currentView = this.wrapParagraph(tail, colWidth)
       }
-      wrappedCols.push(state.currentView)
+
+      // Apply the Line Formatter to prevent color bleed!
+      const formattedView = state.currentView.map((line, lineIdx) =>
+        this.#lineFormatter(line, lineIdx, i, buffers, state.currentView)
+      )
+
+      wrappedCols.push(formattedView)
     }
 
     const maxLines = Math.max(...wrappedCols.map(c => c.length), 1)
@@ -260,15 +264,23 @@ export class IncrementalGridFormatter {
     for (let i = 0; i < maxLines; i++) {
       let rowStr = ''
       for (const p of positions) {
-        if (p.type === 'col') rowStr += `\x1b[${p.pos}G${wrappedCols[p.index][i] || ''}`
-        else rowStr += `\x1b[${p.pos}G${styleText('dim', ' │ ')}`
+        if (p.type === 'col') {
+          // Wrap everything in \x1b[0m reset just to be absolutely certain it doesn't bleed
+          rowStr += `\x1b[${p.pos}G${wrappedCols[p.index][i] || ''}\x1b[0m`
+        } else {
+          rowStr += `\x1b[${p.pos}G${styleText('dim', ' │ ')}`
+        }
       }
       rows.push(rowStr)
     }
 
-    // Grid Formatter NO LONGER RETURNS HEADERS. Just pure data.
     return { rows, colWidth }
   }
+}
+
+function getVisualWidth (str) {
+  // Simplistic width for headers
+  return stripVTControlCharacters(str).length // (Can reuse the robust segmenter here)
 }
 
 const ANSI = {
@@ -281,6 +293,36 @@ const ANSI = {
   moveUp: (n) => `\x1b[${n}A`
 }
 
+export function printBatchHeaders (batchSize, options = {}) {
+  const titles = options.titles || Array.from({ length: batchSize }, (_, i) => `Stream ${i + 1}`)
+  const terminalWidth = process.stdout.columns || 120
+  const gap = 3
+  const colWidth = Math.max(2, Math.floor((terminalWidth - (batchSize - 1) * gap) / batchSize))
+
+  const positions = []
+  let currentPos = 1
+  for (let i = 0; i < batchSize; i++) {
+    positions.push({ type: 'col', pos: currentPos, index: i })
+    currentPos += colWidth
+    if (i < batchSize - 1) {
+      positions.push({ type: 'gap', pos: currentPos })
+      currentPos += gap
+    }
+  }
+
+  let headers = ''
+  for (const p of positions) {
+    if (p.type === 'col') {
+      const title = ` ${titles[p.index]} `
+      const padLen = Math.max(0, colWidth - (title.length))
+      headers += `\x1b[${p.pos}G\x1b[1m\x1b[36m${title}${'─'.repeat(padLen)}\x1b[0m`
+    } else {
+      headers += `\x1b[${p.pos}G\x1b[2m │ \x1b[0m`
+    }
+  }
+  process.stdout.write('\r\x1b[K' + headers + '\n')
+}
+
 export function createBatchRenderer (batchSize, options = {}) {
   const formatter = new IncrementalGridFormatter(batchSize, options)
   const rl = options.readline
@@ -291,7 +333,10 @@ export function createBatchRenderer (batchSize, options = {}) {
 
   return function renderTick (columnBuffers, isFinished = false) {
     const termWidth = process.stdout.columns || 120
-    const { headers, rows } = formatter.formatGrid(columnBuffers, termWidth)
+
+    // Ensure buffers exist to prevent 'undefined'
+    const safeBuffers = Array.from({ length: batchSize }, (_, i) => columnBuffers[i] || '')
+    const { rows } = formatter.formatGrid(safeBuffers, termWidth)
 
     if (rl) {
       readline.cursorTo(process.stdout, 0)
@@ -301,7 +346,6 @@ export function createBatchRenderer (batchSize, options = {}) {
     process.stdout.write(ANSI.HIDE_CURSOR + ANSI.DISABLE_WRAP)
 
     if (needsFullRedraw || previousRows.length === 0) {
-      process.stdout.write('\r' + ANSI.CLEAR_LINE + headers + '\n')
       rows.forEach(r => process.stdout.write('\r' + ANSI.CLEAR_LINE + r + '\n'))
       needsFullRedraw = false
     } else {
@@ -335,40 +379,4 @@ export function createBatchRenderer (batchSize, options = {}) {
       rl.prompt(true)
     }
   }
-}
-
-function getVisualWidth (str) {
-  // Simplistic width for headers
-  return stripVTControlCharacters(str).length // (Can reuse the robust segmenter here)
-}
-
-export function printBatchHeaders (batchSize, options = {}) {
-  const titles = options.titles || Array.from({ length: batchSize }, (_, i) => `Stream ${i + 1}`)
-  const terminalWidth = process.stdout.columns || 120
-  const gap = 3
-  const colWidth = Math.max(2, Math.floor((terminalWidth - (batchSize - 1) * gap) / batchSize))
-
-  const positions = []
-  let currentPos = 1
-  for (let i = 0; i < batchSize; i++) {
-    positions.push({ type: 'col', pos: currentPos, index: i })
-    currentPos += colWidth
-    if (i < batchSize - 1) {
-      positions.push({ type: 'gap', pos: currentPos })
-      currentPos += gap
-    }
-  }
-
-  let headers = ''
-  for (const p of positions) {
-    if (p.type === 'col') {
-      const title = ` ${titles[p.index]} `
-      const padLen = Math.max(0, colWidth - getVisualWidth(title))
-      headers += `\x1b[${p.pos}G${styleText(['bold', 'cyan'], title + '─'.repeat(padLen))}`
-    } else {
-      headers += `\x1b[${p.pos}G${styleText('dim', ' ┬ ')}`
-    }
-  }
-
-  process.stdout.write('\r\x1b[K' + headers + '\n')
 }
