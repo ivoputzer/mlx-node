@@ -240,6 +240,31 @@ class AbortError extends Error {
   }
 }
 
+export function padTokenFrom (tokenizer) {
+  const config = tokenizer.config
+
+  // Actual pad token ID
+  if (config.pad_token_id !== undefined && config.pad_token_id !== null) {
+    return config.pad_token_id
+  }
+
+  // Sometimes it's passed as a string in tokenizer_config.json
+  if (config.pad_token && tokenizer.model.tokens_to_ids.has(config.pad_token)) {
+    return tokenizer.token_to_id(config.pad_token)
+  }
+
+  // Fallback: Unknown Token (The safest "white noise" for Mamba KVCache)
+  if (config.unk_token_id !== undefined && config.unk_token_id !== null) {
+    return config.unk_token_id
+  }
+
+  if (config.unk_token && tokenizer.model.tokens_to_ids.has(config.unk_token)) {
+    return tokenizer.token_to_id(config.unk_token)
+  }
+
+  return 0 // Absolute Last Resort: 0 (Usually maps to <unk>, <s>, or <pad> anyway)
+}
+
 export function stopTokenIdsFrom (tokenizer) {
   const stopTokens = new Set()
 
