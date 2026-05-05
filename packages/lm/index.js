@@ -242,6 +242,8 @@ class AbortError extends Error {
 
 export function padTokenFrom (tokenizer) {
   const config = tokenizer.config
+  const hasTokenId = tokenizer.model.tokens_to_ids.has.bind(tokenizer.model.tokens_to_ids) // tokenizer.model.tokens_to_ids is a Map()
+  const getTokenId = tokenizer.token_to_id
 
   // Actual pad token ID
   if (config.pad_token_id !== undefined && config.pad_token_id !== null) {
@@ -249,8 +251,8 @@ export function padTokenFrom (tokenizer) {
   }
 
   // Sometimes it's passed as a string in tokenizer_config.json
-  if (config.pad_token && tokenizer.model.tokens_to_ids.has(config.pad_token)) {
-    return tokenizer.token_to_id(config.pad_token)
+  if (config.pad_token && hasTokenId(config.pad_token)) {
+    return getTokenId(config.pad_token)
   }
 
   // Fallback: Unknown Token (The safest "white noise" for Mamba KVCache)
@@ -258,8 +260,8 @@ export function padTokenFrom (tokenizer) {
     return config.unk_token_id
   }
 
-  if (config.unk_token && tokenizer.model.tokens_to_ids.has(config.unk_token)) {
-    return tokenizer.token_to_id(config.unk_token)
+  if (config.unk_token && hasTokenId(config.unk_token)) {
+    return getTokenId(config.unk_token)
   }
 
   return 0 // Absolute Last Resort: 0 (Usually maps to <unk>, <s>, or <pad> anyway)
