@@ -122,14 +122,19 @@ export class IncrementalGridFormatter {
   #segmenter
   #batchSize
   #tabSize
-  #titles
   #lastColWidth
   #colStates
+
+  // Dependency Injection Hooks
+  #cellFormatter
+  #tailFormatter
 
   constructor (batchSize, options = {}) {
     this.#batchSize = batchSize
     this.#tabSize = options.tabSize || 2
-    this.#titles = options.titles || Array.from({ length: batchSize }, (_, i) => `Stream ${i + 1}`)
+    this.#cellFormatter = options.cellFormatter || ((text) => text)
+    this.#tailFormatter = options.tailFormatter || (() => '')
+
     this.#segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
     this.#lastColWidth = 0
     this.#colStates = this.#createEmptyState()
@@ -213,8 +218,10 @@ export class IncrementalGridFormatter {
 
     for (let i = 0; i < this.#batchSize; i++) {
       const state = this.#colStates[i]
-      const buffer = buffers[i] || ''
-      const unprocessed = buffer.slice(state.lockedLen)
+      // 1. Run the raw buffer through the user's custom formatter
+      const formattedBuffer = this.#cellFormatter(buffers[i] || '', i, buffers)
+
+      const unprocessed = formattedBuffer.slice(state.lockedLen)
 
       if (unprocessed) {
         const parts = unprocessed.split('\n')
@@ -222,10 +229,16 @@ export class IncrementalGridFormatter {
           state.lockedLines.push(...this.wrapParagraph(parts[p], colWidth))
           state.lockedLen += parts[p].length + 1
         }
-        const activeWrapped = this.wrapParagraph(parts[parts.length - 1], colWidth)
+
+        // 2. Inject the dynamic "Tail" (Stats/TPS) right in front of the active typing cursor
+        const tail = this.#tailFormatter(i, buffers)
+        const activeWrapped = this.wrapParagraph(parts[parts.length - 1] + tail, colWidth)
+
         state.currentView = [...state.lockedLines, ...activeWrapped]
       } else if (state.currentView.length === 0) {
-        state.currentView = ['']
+        // If buffer is totally empty, still print the tail
+        const tail = this.#tailFormatter(i, buffers)
+        state.currentView = this.wrapParagraph(tail, colWidth)
       }
       wrappedCols.push(state.currentView)
     }
@@ -253,18 +266,8 @@ export class IncrementalGridFormatter {
       rows.push(rowStr)
     }
 
-    let headers = ''
-    for (const p of positions) {
-      if (p.type === 'col') {
-        const title = ` ${this.#titles[p.index]} `
-        const padLen = Math.max(0, colWidth - this.getWidth(title))
-        headers += `\x1b[${p.pos}G${styleText(['bold', 'cyan'], title + '─'.repeat(padLen))}`
-      } else {
-        headers += `\x1b[${p.pos}G${styleText('dim', ' ┬ ')}`
-      }
-    }
-
-    return { headers, rows, colWidth }
+    // Grid Formatter NO LONGER RETURNS HEADERS. Just pure data.
+    return { rows, colWidth }
   }
 }
 
@@ -332,4 +335,40 @@ export function createBatchRenderer (batchSize, options = {}) {
       rl.prompt(true)
     }
   }
+}
+
+function getVisualWidth (str) {
+  // Simplistic width for headers
+  return stripVTControlCharacters(str).length // (Can reuse the robust segmenter here)
+}
+
+export function printBatchHeaders (batchSize, options = {}) {
+  const titles = options.titles || Array.from({ length: batchSize }, (_, i) => `Stream ${i + 1}`)
+  const terminalWidth = process.stdout.columns || 120
+  const gap = 3
+  const colWidth = Math.max(2, Math.floor((terminalWidth - (batchSize - 1) * gap) / batchSize))
+
+  const positions = []
+  let currentPos = 1
+  for (let i = 0; i < batchSize; i++) {
+    positions.push({ type: 'col', pos: currentPos, index: i })
+    currentPos += colWidth
+    if (i < batchSize - 1) {
+      positions.push({ type: 'gap', pos: currentPos })
+      currentPos += gap
+    }
+  }
+
+  let headers = ''
+  for (const p of positions) {
+    if (p.type === 'col') {
+      const title = ` ${titles[p.index]} `
+      const padLen = Math.max(0, colWidth - getVisualWidth(title))
+      headers += `\x1b[${p.pos}G${styleText(['bold', 'cyan'], title + '─'.repeat(padLen))}`
+    } else {
+      headers += `\x1b[${p.pos}G${styleText('dim', ' ┬ ')}`
+    }
+  }
+
+  process.stdout.write('\r\x1b[K' + headers + '\n')
 }
