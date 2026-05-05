@@ -35,6 +35,7 @@ struct BridgeGenerateConfig: Decodable {
   var batchSize: Int?
   var chunkSize: Int?
   var stopTokenIds: [Int]?
+  var padTokenId: Int?  // Configuration fallback to replace post-generation hallucinations
 
   func toGenerateParameters() -> GenerateParameters {
     return GenerateParameters(
@@ -68,13 +69,27 @@ private class CacheContainer {
   var kvBits: Int?
   var kvGroupSize: Int?
   var quantizedKVStart: Int?
+  var paddingCounts: [Int]  // Tracks the number of injected pad tokens per sequence
+
   init(
-    _ caches: [KVCache], kvBits: Int? = nil, kvGroupSize: Int? = nil, quantizedKVStart: Int? = nil
+    _ caches: [KVCache],
+    kvBits: Int? = nil,
+    kvGroupSize: Int? = nil,
+    quantizedKVStart: Int? = nil,
+    paddingCounts: [Int]? = nil
   ) {
     self.caches = caches
     self.kvBits = kvBits
     self.kvGroupSize = kvGroupSize
     self.quantizedKVStart = quantizedKVStart
+
+    // Initialize paddingCounts with 0s based on the batch size, or default to 1
+    if let counts = paddingCounts {
+      self.paddingCounts = counts
+    } else {
+      let batchSize = caches.first?.state.first?.shape[0] ?? 1
+      self.paddingCounts = Array(repeating: 0, count: max(1, batchSize))
+    }
   }
 }
 
@@ -163,8 +178,19 @@ private func compileStopTokens(context: ModelContext, config: BridgeGenerateConf
   return stopTokenIds
 }
 
-private func expandCacheDimensions(_ caches: inout [KVCache], targetBatchSize: Int) {
+private func expandCacheDimensions(
+  _ caches: inout [KVCache],
+  targetBatchSize: Int,
+  paddingCounts: inout [Int]
+) {
   guard targetBatchSize > 1 else { return }
+
+  // Safeguard against multiplying a cache that's already been expanded
+  if let firstShape = caches.first?.state.first?.shape, firstShape.count > 0,
+    firstShape[0] == targetBatchSize
+  {
+    return
+  }
 
   var prefillStates: [MLXArray] = []
   for cache in caches { prefillStates.append(contentsOf: cache.state) }
@@ -173,13 +199,18 @@ private func expandCacheDimensions(_ caches: inout [KVCache], targetBatchSize: I
   var postBroadcastStates: [MLXArray] = []
   for i in 0..<caches.count {
     let duplicated = caches[i].state.map { array in
-      array.size > 0
+      array.size > 0 && array.shape[0] == 1
         ? MLX.concatenated(Array(repeating: array, count: targetBatchSize), axis: 0) : array
     }
     caches[i].state = duplicated
     postBroadcastStates.append(contentsOf: duplicated)
   }
   eval(postBroadcastStates)
+
+  // Expand padding counts to match the newly duplicated batches
+  if paddingCounts.count == 1 {
+    paddingCounts = Array(repeating: paddingCounts[0], count: targetBatchSize)
+  }
 }
 
 /// A clean, branch-isolated token sampler that prevents hallucinations across batches
@@ -224,7 +255,7 @@ private func sampleBatchedTokens(
 }
 
 // ============================================================================
-// 4. THE CORE GENERATION ENGINE (DRY)
+// 4. THE CORE GENERATION ENGINE
 // ============================================================================
 
 /// A unified generation engine that powers both Homogeneous and Heterogeneous batching.
@@ -254,6 +285,8 @@ private func executeGenerationTask(
   params.kvGroupSize = activeGroupSize
   params.quantizedKVStart = activeStart
 
+  let padTokenId = config.padTokenId ?? 0
+
   var finalStats: GenerateStats? = nil
   var finalErrorStr: String? = nil
   var wasCancelled = false
@@ -263,9 +296,15 @@ private func executeGenerationTask(
     let isFreshCache = caches == nil || (caches!.first?.state.isEmpty ?? true)
     let currentCacheBatchSize = isFreshCache ? 1 : (caches!.first?.state.first?.shape[0] ?? 1)
 
+    var paddingCounts =
+      cacheContainer?.paddingCounts ?? Array(repeating: 0, count: currentCacheBatchSize)
+
     // Expand existing B=1 caches to B=N before prefill if necessary
     if !isFreshCache && currentCacheBatchSize == 1 && batchSize > 1 {
-      expandCacheDimensions(&caches!, targetBatchSize: batchSize)
+      expandCacheDimensions(&caches!, targetBatchSize: batchSize, paddingCounts: &paddingCounts)
+    } else if isFreshCache && paddingCounts.count == 1 && batchSize > 1 && !isHomogeneous {
+      // If heterogeneous and fresh, the cache will be created as B=N directly during prefill
+      paddingCounts = Array(repeating: paddingCounts[0], count: batchSize)
     }
 
     var tokenBuffer = [Int32]()
@@ -329,7 +368,7 @@ private func executeGenerationTask(
 
     // 3. POST-EXPANSION (Turn 1 Homogeneous Branching)
     if isHomogeneous && isFreshCache && batchSize > 1 {
-      expandCacheDimensions(&caches!, targetBatchSize: batchSize)
+      expandCacheDimensions(&caches!, targetBatchSize: batchSize, paddingCounts: &paddingCounts)
       currentTokenInput = .init(
         tokens: MLX.concatenated(
           Array(repeating: currentTokenInput.tokens, count: batchSize), axis: 0))
@@ -337,6 +376,7 @@ private func executeGenerationTask(
     }
 
     cacheContainer?.caches = caches!
+    cacheContainer?.paddingCounts = paddingCounts
     MLX.asyncEval(currentTokenInput.tokens)
 
     let promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
@@ -386,6 +426,7 @@ private func executeGenerationTask(
       }
 
       let latestTokens = currentTokenInput.tokens.asArray(Int32.self)
+      var nextInputTokens = latestTokens  // We will modify this to intercept post-EOS hallucinations
 
       if promptTime == 0 {
         promptTime = Date.timeIntervalSinceReferenceDate - start
@@ -398,12 +439,14 @@ private func executeGenerationTask(
           if stopTokenIds.contains(tokenId) {
             isDone[index] = true
             completedCount += 1
-            tokenBuffer.append(-1)
+            tokenBuffer.append(Int32(padTokenId)) // Emit the legitimate EOS token to JS
+            nextInputTokens[index] = Int32(padTokenId)  // Replace with padTokenId for the MLX forward pass
           } else {
             tokenBuffer.append(Int32(tokenId))
           }
         } else {
-          tokenBuffer.append(-1)
+          tokenBuffer.append(Int32(padTokenId))  // Emit padTokenId instead of hallucination
+          nextInputTokens[index] = Int32(padTokenId)  // Keep forcing padTokenId into the model input
         }
       }
 
@@ -421,6 +464,16 @@ private func executeGenerationTask(
         stopReason = "length"
         break
       }
+
+      // We only track injected pad tokens for steps that are ACTUALLY evaluated through the model
+      for index in 0..<batchSize {
+        if isDone[index] {
+          paddingCounts[index] += 1
+        }
+      }
+
+      // Override currentTokenInput to enforce the "Open Mouth" paradigm and protect the KV cache
+      currentTokenInput = .init(tokens: MLXArray(nextInputTokens).reshaped(batchSize, 1))
 
       let result = modelContainer.context.model(
         currentTokenInput, cache: caches!.isEmpty ? nil : caches!, state: state)
@@ -441,6 +494,8 @@ private func executeGenerationTask(
     }
 
     cacheContainer?.caches = caches!
+    cacheContainer?.paddingCounts = paddingCounts
+
     if Task.isCancelled { wasCancelled = true }
     Stream().synchronize()
 
@@ -529,7 +584,7 @@ public func bridge_cache_create(modelPtr: UnsafeMutableRawPointer, configJson: U
   let caches = container.context.model.newCache(parameters: configObj.toGenerateParameters())
   let cacheContainer = CacheContainer(
     caches, kvBits: configObj.kvBits, kvGroupSize: configObj.kvGroupSize,
-    quantizedKVStart: configObj.quantizedKVStart)
+    quantizedKVStart: configObj.quantizedKVStart, paddingCounts: nil)
   return Unmanaged.passRetained(cacheContainer).toOpaque()
 }
 
@@ -547,7 +602,8 @@ public func bridge_cache_clone(ptr: UnsafeMutableRawPointer) -> UnsafeMutableRaw
   }
   let newContainer = CacheContainer(
     clonedCaches, kvBits: container.kvBits, kvGroupSize: container.kvGroupSize,
-    quantizedKVStart: container.quantizedKVStart)
+    quantizedKVStart: container.quantizedKVStart,
+    paddingCounts: container.paddingCounts)
   return Unmanaged.passRetained(newContainer).toOpaque()
 }
 
@@ -562,15 +618,30 @@ public func bridge_cache_slice(ptr: UnsafeMutableRawPointer, start: Int32, end: 
     newCache.state = newCache.state.map { array in
       guard array.size > 0, array.shape[0] > 1 else { return array }
       let actualEnd = min(Int(end), array.shape[0])
-      let indices = MLXArray((Int32(start)..<Int32(actualEnd)).map { $0 })
+      let actualStart = min(Int(start), actualEnd)
+      let indices = MLXArray((Int32(actualStart)..<Int32(actualEnd)).map { $0 })
       return array.take(indices, axis: 0)
     }
     return newCache
   }
 
+  // Extract the sliced padding counts corresponding to the batch range
+  let actualEnd = min(Int(end), container.paddingCounts.count)
+  let actualStart = min(Int(start), actualEnd)
+  var slicedPaddingCounts = Array(container.paddingCounts[actualStart..<actualEnd])
+
+  // Trim the lowest common denominator of pad tokens among the extracted sequences
+  let minPadding = slicedPaddingCounts.min() ?? 0
+  if minPadding > 0 && MLXLMCommon.canTrimPromptCache(slicedCaches) {
+    MLXLMCommon.trimPromptCache(slicedCaches, numTokens: minPadding)
+    slicedPaddingCounts = slicedPaddingCounts.map { $0 - minPadding }
+  }
+
   let newContainer = CacheContainer(
     slicedCaches, kvBits: container.kvBits, kvGroupSize: container.kvGroupSize,
-    quantizedKVStart: container.quantizedKVStart)
+    quantizedKVStart: container.quantizedKVStart,
+    paddingCounts: slicedPaddingCounts
+  )
   return Unmanaged.passRetained(newContainer).toOpaque()
 }
 
@@ -583,7 +654,9 @@ public func bridge_cache_save(
   let url = URL(fileURLWithPath: String(cString: path))
   Task {
     do {
-      try MLXLMCommon.savePromptCache(url: url, cache: container.caches)
+      let paddingCountsStr = container.paddingCounts.map { String($0) }.joined(separator: ",")
+      let metadata = ["paddingCounts": paddingCountsStr]
+      try MLXLMCommon.savePromptCache(url: url, cache: container.caches, metadata: metadata)
       callback(context, true, nil, nil)
     } catch {
       error.localizedDescription.withCString { callback(context, false, nil, $0) }
@@ -598,8 +671,14 @@ public func bridge_cache_load(
   let url = URL(fileURLWithPath: String(cString: path))
   Task {
     do {
-      let (caches, _) = try MLXLMCommon.loadPromptCache(url: url)
-      let container = CacheContainer(caches)
+      let (caches, metadata) = try MLXLMCommon.loadPromptCache(url: url)
+
+      var paddingCounts: [Int]? = nil
+      if let countsStr = metadata["paddingCounts"] {
+        paddingCounts = countsStr.split(separator: ",").compactMap { Int($0) }
+      }
+
+      let container = CacheContainer(caches, paddingCounts: paddingCounts)
       let ptr = Unmanaged.passRetained(container).toOpaque()
       callback(context, true, ptr, nil)
     } catch {
@@ -612,6 +691,10 @@ public func bridge_cache_load(
 public func bridge_cache_trim(ptr: UnsafeMutableRawPointer, numTokens: Int32) -> Int32 {
   let container = Unmanaged<CacheContainer>.fromOpaque(ptr).takeUnretainedValue()
   let trimmed = MLXLMCommon.trimPromptCache(container.caches, numTokens: Int(numTokens))
+
+  // If user trims manually from JS, deduct from the known padded hallucination tracker
+  container.paddingCounts = container.paddingCounts.map { max(0, $0 - trimmed) }
+
   return Int32(trimmed)
 }
 
@@ -771,11 +854,19 @@ public func bridge_model_evaluate_task(
         eval(result.logits)
       }
 
+      let isFreshCache = caches == nil || (caches!.first?.state.isEmpty ?? true)
+      let currentCacheBatchSize = isFreshCache ? 1 : (caches!.first?.state.first?.shape[0] ?? 1)
+      var paddingCounts =
+        cacheContainer?.paddingCounts ?? Array(repeating: 0, count: currentCacheBatchSize)
+
       maybeQuantizeKVCache(
         cache: &caches!, kvBits: activeKvBits, kvGroupSize: activeGroupSize,
         quantizedKVStart: activeStart)
-      expandCacheDimensions(&caches!, targetBatchSize: batchSize)
+
+      expandCacheDimensions(&caches!, targetBatchSize: batchSize, paddingCounts: &paddingCounts)
+
       cacheContainer?.caches = caches!
+      cacheContainer?.paddingCounts = paddingCounts
 
       if Task.isCancelled {
         "Evaluation Cancelled".withCString { callback(context, false, nil, $0) }
