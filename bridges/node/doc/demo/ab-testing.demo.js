@@ -1,5 +1,5 @@
 import { MLXCache, MLXMetrics, MLXModel } from 'mlx-swift'
-import { loadTokenizer, loadTemplate, stopTokenIdsFrom } from 'mlx-lm'
+import { loadTokenizer, loadTemplate, stopTokenIdsFrom, padTokenFrom, stopTokensFrom } from 'mlx-lm'
 import { styleText, parseArgs, stripVTControlCharacters } from 'node:util'
 import { createInterface } from 'node:readline'
 import { stdin, stdout } from 'node:process'
@@ -14,14 +14,18 @@ const { values } = parseArgs({
     prompt: { short: 'p', type: 'string', default: 'Give me a cool name for a space dog.' },
     size: { short: 's', type: 'string', default: '2' },
     temperature: { short: 't', type: 'string', default: '0.8' },
-    maxTokens: { type: 'string', default: '512' }
+    maxTokens: { type: 'string', default: '256' }
   }
 })
 
 const tokenizer = await loadTokenizer(values.model)
 const template = await loadTemplate(values.model)
-const stopTokenIds = stopTokenIdsFrom(tokenizer)
+const stopTokenIds = stopTokensFrom(tokenizer)
+const padTokenId = padTokenFrom(tokenizer)
 const readline = createInterface({ input: stdin, output: stdout })
+
+console.log('stopTokenIds:', stopTokenIds, stopTokenIds.map(tokenizer.id_to_token.bind(tokenizer)))
+console.log('padTokenId:', padTokenId, tokenizer.id_to_token(padTokenId))
 
 // ============================================================================
 // TURN 1: PREFILL AND A/B TEST (Homogeneous Batching)
@@ -52,15 +56,13 @@ const sharedPromptTokens = new Int32Array(tokenizer.encode(sharedPrompt).ids)
 const turn1 = cache.generate(sharedPromptTokens, {
   batchSize,
   stopTokenIds,
+  padTokenId,
   temperature: Number(values.temperature),
   maxTokens: Number(values.maxTokens)
 })
-
 for await (const batches of turn1) {
   batches.forEach((tokenId, i) => {
-    if (tokenId !== -1) {
-      batchBuffer[i] += tokenizer.decode([tokenId], { skip_special_tokens: false, clean_up_tokenization_spaces: false })
-    }
+    batchBuffer[i] += tokenizer.decode([tokenId], { skip_special_tokens: true, clean_up_tokenization_spaces: false })
   })
   render(batchBuffer)
 }
@@ -151,7 +153,7 @@ console.log(styleText('cyan', `\n[System] Continuing conversation from Branch ${
 const renderWinner = createBatchRenderer(1, { readline, cellFormatter: (t) => styleText('green', t) })
 
 const finalResponse = ['']
-const turn2 = winningCache.generate(tokens2, { batchSize: 1, stopTokenIds, maxTokens: Number(values.maxTokens) })
+const turn2 = winningCache.generate(tokens2, { batchSize: 1, stopTokenIds, padTokenId, maxTokens: Number(values.maxTokens) })
 
 for await (const batches of turn2) {
   const token = batches[0]
