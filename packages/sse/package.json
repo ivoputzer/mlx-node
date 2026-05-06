@@ -2,5 +2,8 @@
   "name": "mlx-sse",
   "version": "0.0.0-draft.0",
   "type": "module",
-  "private": false
+  "private": false,
+  "scripts": {
+    "start": "node index.js"
+  }
 }
