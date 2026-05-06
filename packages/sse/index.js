@@ -1,7 +1,7 @@
 import http from 'node:http'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { createHash, randomUUID } from 'node:crypto'
+import crypto from 'node:crypto'
 import { parseArgs } from 'node:util'
 
 import { MLXModel, MLXCache, MLXMetrics } from 'mlx-swift'
@@ -22,10 +22,7 @@ const { values: args } = parseArgs({
 const CACHE_DIR = path.join(process.cwd(), '.mlx_sessions')
 await fs.mkdir(CACHE_DIR, { recursive: true }).catch(() => {})
 
-// Registries
-// path -> { name, model, tokenizer, template, stopTokens, padTokenId }
 const MODELS = new Map()
-// sessionId -> { cache, historyTokens: number[], lastAccess, diskPath }
 const SESSIONS = new Map()
 
 // ============================================================================
@@ -33,31 +30,24 @@ const SESSIONS = new Map()
 // ============================================================================
 
 const ToolParsers = {
-  // Parses typical <tool_call>...</tool_call> outputs
   xml: (raw) => {
     try {
       const nameMatch = raw.match(/"name":\s*"([^"]+)"/)
       if (nameMatch) {
-        // Handle Qwen-style JSON inside XML tags
         const jsonMatch = raw.match(/{[\s\S]*}/)
         const parsed = JSON.parse(jsonMatch[0])
         return { name: parsed.name, arguments: JSON.stringify(parsed.arguments || {}) }
       }
 
-      // Handle DeepSeek/Generic XML attributes
       const funcMatch = raw.match(/<function=(.*?)>/)
       if (funcMatch) {
         const args = {}
         const paramRegex = /<parameter=(.*?)>\n?([\s\S]*?)\n?<\/parameter>/g
         let m
-        while ((m = paramRegex.exec(raw)) !== null) {
-          args[m[1]] = m[2].trim()
-        }
+        while ((m = paramRegex.exec(raw)) !== null) args[m[1]] = m[2].trim()
         return { name: funcMatch[1], arguments: JSON.stringify(args) }
       }
-    } catch {
-      return null // Fallback if parsing fails
-    }
+    } catch { return null }
   }
 }
 
@@ -67,27 +57,23 @@ const ToolParsers = {
 
 async function getOrCreateSession (sessionId, modelConfig) {
   const { model, name: modelName } = modelConfig
-  const sessionKey = createHash('sha256').update(`${sessionId}_${modelName}`).digest('hex').slice(0, 16)
+  const sessionKey = crypto.createHash('sha256').update(`${sessionId}_${modelName}`).digest('hex').slice(0, 16)
   const diskPath = path.join(CACHE_DIR, sessionKey)
 
-  // 1. Check RAM (Active Session)
   if (SESSIONS.has(sessionKey)) {
     const session = SESSIONS.get(sessionKey)
     session.lastAccess = Date.now()
     return session
   }
 
-  // 2. Check Disk (Sleeping Session)
   try {
     await fs.access(`${diskPath}.safetensors`)
     const cache = await MLXCache.fromPath(`${diskPath}.safetensors`, model)
     const meta = JSON.parse(await fs.readFile(`${diskPath}.meta.json`, 'utf8'))
-
     const session = { cache, historyTokens: meta.historyTokens, lastAccess: Date.now(), diskPath }
     SESSIONS.set(sessionKey, session)
     return session
   } catch {
-    // 3. Create Fresh Session
     const cache = MLXCache.fromModel(model)
     const session = { cache, historyTokens: [], lastAccess: Date.now(), diskPath }
     SESSIONS.set(sessionKey, session)
@@ -102,16 +88,14 @@ async function saveSessionToDisk (session) {
 }
 
 // ============================================================================
-// CORE GENERATION (Token Diffing & Open Mouth)
+// CORE GENERATION
 // ============================================================================
 
 async function * generateMLXStream (session, fullPromptString, modelConfig, options) {
   const { tokenizer, model, stopTokens, padTokenId } = modelConfig
-
-  // 1. Encode the target prompt
   const targetTokens = tokenizer.encode(fullPromptString).ids
 
-  // 2. Diff against Cache History
+  // Diffing logic
   let commonPrefixLen = 0
   while (
     commonPrefixLen < session.historyTokens.length &&
@@ -122,67 +106,115 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
   }
 
   const tokensToTrim = session.historyTokens.length - commonPrefixLen
-
-  // 3. Reconcile State
   if (tokensToTrim > 0) {
-    if (session.cache.isTrimmable) {
-      session.cache.trim(tokensToTrim)
-    } else {
-      // Mamba/RNN fallback: Cannot trim, must restart context
+    if (session.cache.isTrimmable) session.cache.trim(tokensToTrim)
+    else {
       session.cache.dispose()
       session.cache = MLXCache.fromModel(model)
       commonPrefixLen = 0
     }
   }
 
-  // 4. Update memory to strictly mirror the new target context
   session.historyTokens = Array.from(targetTokens)
-
-  // The un-evaluated "new" portion of the prompt (including the previous turn's EOS token!)
   const newTokens = new Int32Array(targetTokens.slice(commonPrefixLen))
 
-  // 5. Generate
+  const n = options.n || 1
   const stream = session.cache.generate(newTokens, {
-    batchSize: 1,
+    batchSize: n,
     temperature: options.temperature ?? 0.7,
     maxTokens: options.max_tokens ?? 1024,
     stopTokenIds: stopTokens,
     padTokenId
   })
 
-  let toolBuffer = ''
-  let inToolBlock = false
+  // Check if template already opened <think>
+  const startsThinking = fullPromptString.endsWith('<think>\n') || fullPromptString.endsWith('<think>')
+
+  // State per branch (n)
+  const branches = Array.from({ length: n }, (_, i) => ({
+    index: i,
+    active: true,
+    inThinkBlock: startsThinking,
+    inToolBlock: false,
+    toolBuffer: '',
+    toolId: `call_${crypto.randomUUID().slice(0, 8)}`,
+    tokens: 0
+  }))
+
+  let activeCount = n
 
   for await (const batches of stream) {
-    const tokenId = batches[0]
-    if (tokenId === -1) continue // Pad skip
-    if (stopTokens.includes(tokenId)) break
+    for (let i = 0; i < n; i++) {
+      const branch = branches[i]
+      if (!branch.active) continue
 
-    // Track generated tokens to keep diff state perfectly aligned
-    session.historyTokens.push(tokenId)
-
-    const textChunk = tokenizer.decode([tokenId], { skip_special_tokens: false })
-
-    // Tool Call Detection Logic
-    if (textChunk.includes('<tool_call>')) inToolBlock = true
-
-    if (inToolBlock) {
-      toolBuffer += textChunk
-      if (toolBuffer.includes('</tool_call>')) {
-        const parsedTool = ToolParsers.xml(toolBuffer)
-        if (parsedTool) yield { type: 'tool', tool: parsedTool }
-
-        inToolBlock = false
-        toolBuffer = ''
+      const tokenId = batches[i]
+      if (tokenId === -1 || stopTokens.includes(tokenId)) {
+        branch.active = false
+        activeCount--
+        continue
       }
-      continue // Suppress tool text from standard output
-    }
 
-    yield { type: 'text', text: textChunk }
+      branch.tokens++
+
+      // We only strictly track main branch (0) for stateful continuity
+      if (i === 0) session.historyTokens.push(tokenId)
+
+      let textChunk = tokenizer.decode([tokenId], { skip_special_tokens: false })
+
+      // 1. Thinking Parser
+      if (textChunk.includes('<think>')) {
+        branch.inThinkBlock = true
+        textChunk = textChunk.replace('<think>', '')
+      }
+      if (textChunk.includes('</think>')) {
+        branch.inThinkBlock = false
+        textChunk = textChunk.replace('</think>', '')
+      }
+
+      if (branch.inThinkBlock && textChunk) {
+        yield { branchIndex: i, type: 'reasoning', text: textChunk }
+        continue
+      }
+
+      // 2. Tool Call Parser
+      if (textChunk.includes('<tool_call>')) {
+        branch.inToolBlock = true
+        textChunk = textChunk.replace('<tool_call>', '')
+        // Early emit the tool call wrapper so client knows we are calling a tool
+        yield { branchIndex: i, type: 'tool_start', id: branch.toolId }
+      }
+
+      if (branch.inToolBlock) {
+        branch.toolBuffer += textChunk
+        if (branch.toolBuffer.includes('</tool_call>')) {
+          const parsedTool = ToolParsers.xml(branch.toolBuffer)
+          if (parsedTool) {
+            yield { branchIndex: i, type: 'tool_finish', id: branch.toolId, tool: parsedTool }
+          }
+          branch.inToolBlock = false
+          branch.toolBuffer = ''
+        }
+        continue // Suppress raw tool text
+      }
+
+      // 3. Standard Text
+      if (textChunk) {
+        yield { branchIndex: i, type: 'text', text: textChunk }
+      }
+    }
+    if (activeCount === 0) break
   }
 
-  // Persist after turn
   await saveSessionToDisk(session)
+
+  // Yield Usage data
+  yield {
+    type: 'usage',
+    prompt_tokens: targetTokens.length,
+    completion_tokens: Math.max(...branches.map(b => b.tokens)),
+    total_tokens: targetTokens.length + Math.max(...branches.map(b => b.tokens))
+  }
 }
 
 // ============================================================================
@@ -190,16 +222,12 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
 // ============================================================================
 
 async function handleChatCompletions (req, res, body) {
-  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
-    return sendError(res, 400, 'messages array is required and must not be empty')
-  }
+  if (!body.messages || !body.messages.length) return sendError(res, 400, 'messages array is required')
 
   const requestedModelName = body.model || Array.from(MODELS.values())[0]?.name
   const modelConfig = Array.from(MODELS.values()).find(m => m.name === requestedModelName)
-
   if (!modelConfig) return sendError(res, 404, `Model '${requestedModelName}' not loaded.`)
 
-  // Render exactly as the tokenizer expects, injecting tools if provided
   const fullPromptString = modelConfig.template.render({
     messages: body.messages,
     tools: body.tools,
@@ -208,59 +236,49 @@ async function handleChatCompletions (req, res, body) {
 
   const session = await getOrCreateSession(body.user || 'default_user', modelConfig)
   const generator = generateMLXStream(session, fullPromptString, modelConfig, body)
-  const requestId = `chatcmpl-${randomUUID()}`
+  const requestId = `chatcmpl-${crypto.randomUUID()}`
 
   if (body.stream) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
 
     for await (const chunk of generator) {
-      if (chunk.type === 'text') {
+      if (chunk.type === 'usage' && body.stream_options?.include_usage) {
+        res.write(`data: ${JSON.stringify({ id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: modelConfig.name, choices: [], usage: chunk })}\n\n`)
+        continue
+      }
+
+      const delta = {}
+      if (chunk.type === 'text') delta.content = chunk.text
+      if (chunk.type === 'reasoning') delta.reasoning_content = chunk.text
+      if (chunk.type === 'tool_start') delta.tool_calls = [{ index: 0, id: chunk.id, type: 'function', function: { name: '', arguments: '' } }]
+      if (chunk.type === 'tool_finish') delta.tool_calls = [{ index: 0, id: chunk.id, function: chunk.tool }]
+
+      if (Object.keys(delta).length > 0) {
         res.write(`data: ${JSON.stringify({
           id: requestId,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: modelConfig.name,
-          choices: [{ index: 0, delta: { content: chunk.text }, finish_reason: null }]
-        })}\n\n`)
-      } else if (chunk.type === 'tool') {
-        res.write(`data: ${JSON.stringify({
-          id: requestId,
-          object: 'chat.completion.chunk',
-          model: modelConfig.name,
-          choices: [{
-            index: 0,
-            delta: {
-              tool_calls: [{
-                id: `call_${randomUUID().slice(0, 8)}`,
-                type: 'function',
-                function: chunk.tool
-              }]
-            },
-            finish_reason: 'tool_calls'
-          }]
+          choices: [{ index: chunk.branchIndex, delta, finish_reason: null }]
         })}\n\n`)
       }
     }
-    res.write(`data: {"id":"${requestId}","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n`)
+
+    // Send stop for all branches
+    for (let i = 0; i < (body.n || 1); i++) {
+      res.write(`data: {"id":"${requestId}","object":"chat.completion.chunk","choices":[{"index":${i},"delta":{},"finish_reason":"stop"}]}\n\n`)
+    }
     res.end('data: [DONE]\n\n')
   } else {
-    // Non-Streaming Wrapper
-    let fullContent = ''
-    const toolCalls = []
+    const branches = Array.from({ length: body.n || 1 }, () => ({ content: '', reasoning_content: '', tool_calls: [] }))
+    let usage = null
 
     for await (const chunk of generator) {
-      if (chunk.type === 'text') fullContent += chunk.text
-      if (chunk.type === 'tool') {
-        toolCalls.push({
-          id: `call_${randomUUID().slice(0, 8)}`,
-          type: 'function',
-          function: chunk.tool
-        })
-      }
+      if (chunk.type === 'usage') usage = chunk
+      else if (chunk.type === 'text') branches[chunk.branchIndex].content += chunk.text
+      else if (chunk.type === 'reasoning') branches[chunk.branchIndex].reasoning_content += chunk.text
+      else if (chunk.type === 'tool_finish') branches[chunk.branchIndex].tool_calls.push({ id: chunk.id, type: 'function', function: chunk.tool })
     }
-
-    const message = { role: 'assistant', content: fullContent }
-    if (toolCalls.length > 0) message.tool_calls = toolCalls
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
@@ -268,50 +286,13 @@ async function handleChatCompletions (req, res, body) {
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: modelConfig.name,
-      choices: [{ message, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop', index: 0 }]
-    }))
-  }
-}
-
-async function handleLegacyCompletions (req, res, body) {
-  if (!body.prompt) return sendError(res, 400, 'prompt is required')
-
-  const requestedModelName = body.model || Array.from(MODELS.values())[0]?.name
-  const modelConfig = Array.from(MODELS.values()).find(m => m.name === requestedModelName)
-  if (!modelConfig) return sendError(res, 404, `Model '${requestedModelName}' not loaded.`)
-
-  const session = await getOrCreateSession(body.user || 'default_user', modelConfig)
-  // Bypass template rendering, just pass raw text
-  const generator = generateMLXStream(session, body.prompt, modelConfig, body)
-  const requestId = `cmpl-${randomUUID()}`
-
-  if (body.stream) {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
-    for await (const chunk of generator) {
-      if (chunk.type === 'text') {
-        res.write(`data: ${JSON.stringify({
-          id: requestId,
-          object: 'text_completion',
-          created: Math.floor(Date.now() / 1000),
-          model: modelConfig.name,
-          choices: [{ text: chunk.text, index: 0, finish_reason: null }]
-        })}\n\n`)
-      }
-    }
-    res.write(`data: {"id":"${requestId}","object":"text_completion","choices":[{"text":"","index":0,"finish_reason":"stop"}]}\n\n`)
-    res.end('data: [DONE]\n\n')
-  } else {
-    let fullContent = ''
-    for await (const chunk of generator) {
-      if (chunk.type === 'text') fullContent += chunk.text
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      id: requestId,
-      object: 'text_completion',
-      created: Math.floor(Date.now() / 1000),
-      model: modelConfig.name,
-      choices: [{ text: fullContent, index: 0, finish_reason: 'stop' }]
+      usage,
+      choices: branches.map((b, index) => {
+        const message = { role: 'assistant', content: b.content }
+        if (b.reasoning_content) message.reasoning_content = b.reasoning_content
+        if (b.tool_calls.length) message.tool_calls = b.tool_calls
+        return { index, message, finish_reason: b.tool_calls.length ? 'tool_calls' : 'stop' }
+      })
     }))
   }
 }
@@ -326,6 +307,9 @@ function sendError (res, status, message) {
 }
 
 const server = http.createServer((req, res) => {
+  const start = Date.now()
+  res.on('finish', () => console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} ${Date.now() - start}ms`))
+
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
@@ -336,10 +320,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/v1/models' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    return res.end(JSON.stringify({
-      object: 'list',
-      data: Array.from(MODELS.values()).map(m => ({ id: m.name, object: 'model', created: Date.now() }))
-    }))
+    return res.end(JSON.stringify({ object: 'list', data: Array.from(MODELS.values()).map(m => ({ id: m.name, object: 'model', created: Date.now() })) }))
   }
 
   if (req.method === 'POST') {
@@ -349,7 +330,7 @@ const server = http.createServer((req, res) => {
       try {
         const body = JSON.parse(bodyData)
         if (url.pathname === '/v1/chat/completions') await handleChatCompletions(req, res, body)
-        else if (url.pathname === '/v1/completions') await handleLegacyCompletions(req, res, body)
+        // Add handleLegacyCompletions here if desired
         else sendError(res, 404, 'Endpoint not found')
       } catch (err) {
         console.error(err)
@@ -358,7 +339,6 @@ const server = http.createServer((req, res) => {
     })
     return
   }
-
   sendError(res, 404, 'Not Found')
 })
 
@@ -366,43 +346,35 @@ const server = http.createServer((req, res) => {
 // BOOT & LIFECYCLE
 // ============================================================================
 
-// GC: Evict RAM caches idle for > 30 mins to VRAM limit
 setInterval(() => {
   const now = Date.now()
   for (const [key, session] of SESSIONS.entries()) {
     if (session.cache.available && now - session.lastAccess > 30 * 60 * 1000) {
-      session.cache.dispose() // Unload from RAM (still safe on disk!)
+      session.cache.dispose()
       console.log(`[GC] Evicted session ${key.slice(0, 8)} from VRAM to disk.`)
     }
   }
 }, 5 * 60 * 1000)
 
 async function boot () {
-  if (args.model.length === 0) {
-    console.warn('⚠️ No models specified via --model (-m). Server will start, but requests may fail.')
-  }
+  if (args.model.length === 0) console.warn('⚠️ No models specified via --model (-m).')
 
   for (const modelPath of args.model) {
     console.log(`Loading model: ${modelPath}...`)
     const name = path.basename(modelPath)
-    const model = await MLXModel.fromPath(modelPath)
-    const tokenizer = await loadTokenizer(modelPath)
-    const template = await loadTemplate(modelPath)
-
     MODELS.set(modelPath, {
       name,
-      model,
-      tokenizer,
-      template,
-      stopTokens: stopTokensFrom(tokenizer),
-      padTokenId: padTokenFrom(tokenizer)
+      model: await MLXModel.fromPath(modelPath),
+      tokenizer: await loadTokenizer(modelPath),
+      template: await loadTemplate(modelPath),
+      stopTokens: stopTokensFrom(await loadTokenizer(modelPath)),
+      padTokenId: padTokenFrom(await loadTokenizer(modelPath))
     })
     console.log(`✅ Loaded: ${name}`)
   }
 
   server.listen(args.port, args.host, () => {
     console.log(`\n🚀 MLX API Server running on http://${args.host}:${args.port}`)
-    console.log(`Metrics: ${MLXMetrics.fromSnapshot().usagePercent.toFixed(1)}% Unified Memory Used`)
   })
 }
 

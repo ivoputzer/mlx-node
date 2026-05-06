@@ -11,7 +11,7 @@ const model = 'MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-8bit' // Chang
 
 describe('mlx-sse', () => {
   describe('POST /v1/chat/completions', () => {
-    it('should successfully handle a single-turn text request', async () => {
+    it('successfully handles a single-turn text request', async () => {
       const messages = [{ role: 'user', content: 'Say hello!' }]
       const res = await request('/v1/chat/completions', { model, user, messages })
 
@@ -21,7 +21,7 @@ describe('mlx-sse', () => {
       strictEqual(res.data.choices[0].message.role, 'assistant')
     })
 
-    it('should successfully handle a multi-turn conversation', async () => {
+    it('successfully handles a multi-turn conversation', async () => {
       const messages = [
         { role: 'system', content: 'You are a helpful assistant.' },
         { role: 'user', content: 'What is 2+2?' },
@@ -34,7 +34,7 @@ describe('mlx-sse', () => {
       ok(res.data.choices[0].message.content, 'Expected a text response')
     })
 
-    it('should return a 400 Bad Request if messages array is missing/empty', async () => {
+    it('responds with 400 Bad Request if messages array is missing or empty', async () => {
       const messages = [] // Invalid per OpenAI spec
       const res = await request('/v1/chat/completions', { model, user, messages })
 
@@ -42,7 +42,7 @@ describe('mlx-sse', () => {
       ok(res.data.error, 'Expected an error object in the response body')
     })
 
-    it('should stream chunks via SSE successfully (stream: true)', async () => {
+    it('successfully streams chunks via SSE when (stream:true)', async () => {
       const messages = [{ role: 'user', content: 'Count to 3.' }]
       const res = await streamRequest('/v1/chat/completions', { model, user, messages })
 
@@ -53,9 +53,41 @@ describe('mlx-sse', () => {
       const hasDelta = res.events.some(event => event.choices[0].delta !== undefined)
       ok(hasDelta, 'Expected streaming events to contain a "delta" object')
     })
+
+    it('supports the n parameter (batching) returning multiple choices', async () => {
+      const messages = [{ role: 'user', content: 'Give me a random color.' }]
+      const n = 2 // Test dual branching
+      const res = await request('/v1/chat/completions', { user, messages, n })
+
+      strictEqual(res.status, 200)
+      strictEqual(res.data.choices.length, n, `Expected exactly ${n} choices back`)
+
+      ok(res.data.choices[0].message.content, 'Choice 0 has content')
+      ok(res.data.choices[1].message.content, 'Choice 1 has content')
+      strictEqual(res.data.choices[0].index, 0)
+      strictEqual(res.data.choices[1].index, 1)
+    })
+
+    it('supports the n parameter (batching) when streaming', async () => {
+      const messages = [{ role: 'user', content: 'Say A or B.' }]
+      const n = 2
+      const res = await streamRequest('/v1/chat/completions', { user, messages, n, stream: true })
+
+      strictEqual(res.status, 200)
+
+      const seenIndices = new Set()
+      res.events.forEach(e => {
+        if (e.choices && e.choices.length > 0) {
+          seenIndices.add(e.choices[0].index)
+        }
+      })
+
+      ok(seenIndices.has(0), 'Stream should contain chunks for index 0')
+      ok(seenIndices.has(1), 'Stream should contain chunks for index 1')
+    })
   })
 
-  describe('Legacy Completions: POST /v1/completions', () => {
+  describe('POST /v1/completions', () => {
     it('should successfully handle a standard text completion', async () => {
       const prompt = 'Once upon a time,'
       const res = await request('/v1/completions', { model, prompt, max_tokens: 10 })
