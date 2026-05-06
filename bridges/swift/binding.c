@@ -28,8 +28,8 @@ extern void bridge_cache_load(const char *path, void *context, void (*callback)(
 extern int32_t bridge_cache_trim(void *ptr, int32_t num_tokens);
 extern char *bridge_cache_debug(void *ptr);
 
-extern void *bridge_model_generate_task(void *model_ptr, void *cache_ptr, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
-extern void *bridge_model_batch_task(void *model_ptr, void *cache_ptr, const int32_t *flat_tokens, int32_t max_len, int32_t batch_size, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, bool, bool, const char *));
+extern void *bridge_model_generate_task(void *model_ptr, void *cache_ptr, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, const int32_t *, const float *, int32_t, bool, bool, const char *));
+extern void *bridge_model_batch_task(void *model_ptr, void *cache_ptr, const int32_t *flat_tokens, int32_t max_len, int32_t batch_size, const char *config_json, void *context, void (*callback)(void *, const int32_t *, int32_t, const int32_t *, const float *, int32_t, bool, bool, const char *));
 extern void *bridge_model_evaluate_task(void *model_ptr, void *cache_ptr, const int32_t *prompt_tokens, int32_t prompt_length, const char *config_json, void *context, void (*callback)(void *, bool, void *, const char *));
 extern void bridge_model_abort_task(void *ptr);
 extern void bridge_model_free_task(void *ptr);
@@ -65,6 +65,9 @@ typedef struct
   bool is_error;
   size_t payload_len;
   int32_t *tokens;
+  int32_t *top_tokens;
+  float *top_probs;
+  int32_t top_k;
   const char *payload;
 } StreamPayload;
 
@@ -245,7 +248,7 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
 
   if (env != NULL && js_callback != NULL)
   {
-    napi_value argv[4], global, js_null;
+    napi_value argv[7], global, js_null;
     napi_get_global(env, &global);
     napi_get_null(env, &js_null);
 
@@ -254,9 +257,12 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
       napi_value err_code = NAPI_CreateString(env, "MLX_STREAM_ERR");
       napi_value err_msg = NAPI_CreateString(env, payload->payload ? payload->payload : "Stream error");
       napi_create_error(env, err_code, err_msg, &argv[0]);
-      argv[1] = js_null;
-      napi_get_boolean(env, true, &argv[2]);
-      argv[3] = js_null;
+      argv[1] = js_null; // tokens
+      argv[2] = js_null; // topTokens
+      argv[3] = js_null; // topProbs
+      napi_create_int32(env, 0, &argv[4]); // topK
+      napi_get_boolean(env, true, &argv[5]); // done
+      argv[6] = js_null; // json
     }
     else
     {
@@ -273,41 +279,77 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
       {
         argv[1] = js_null;
       }
-      napi_get_boolean(env, payload->is_done, &argv[2]);
-      argv[3] = payload->payload ? NAPI_CreateString(env, payload->payload) : js_null;
+
+      if (payload->top_k > 0 && payload->top_tokens != NULL) {
+        void *top_tok_data;
+        napi_value top_tok_buffer;
+        napi_create_arraybuffer(env, payload->token_count * payload->top_k * sizeof(int32_t), &top_tok_data, &top_tok_buffer);
+        memcpy(top_tok_data, payload->top_tokens, payload->token_count * payload->top_k * sizeof(int32_t));
+        napi_create_typedarray(env, napi_int32_array, payload->token_count * payload->top_k, top_tok_buffer, 0, &argv[2]);
+
+        void *top_prob_data;
+        napi_value top_prob_buffer;
+        napi_create_arraybuffer(env, payload->token_count * payload->top_k * sizeof(float), &top_prob_data, &top_prob_buffer);
+        memcpy(top_prob_data, payload->top_probs, payload->token_count * payload->top_k * sizeof(float));
+        napi_create_typedarray(env, napi_float32_array, payload->token_count * payload->top_k, top_prob_buffer, 0, &argv[3]);
+      } else {
+        argv[2] = js_null;
+        argv[3] = js_null;
+      }
+
+      napi_create_int32(env, payload->top_k, &argv[4]);
+      napi_get_boolean(env, payload->is_done, &argv[5]);
+      argv[6] = payload->payload ? NAPI_CreateString(env, payload->payload) : js_null;
     }
-    napi_call_function(env, global, js_callback, 4, argv, NULL);
+    napi_call_function(env, global, js_callback, 7, argv, NULL);
   }
   free(payload);
 }
 
-static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t count, bool is_done, bool is_error, const char *json_payload)
+static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t count, const int32_t *top_tokens, const float *top_probs, int32_t top_k, bool is_done, bool is_error, const char *json_payload)
 {
   napi_threadsafe_function tsfn = (napi_threadsafe_function)context;
 
   size_t struct_size = sizeof(StreamPayload);
   size_t tokens_size = count > 0 ? count * sizeof(int32_t) : 0;
+
+  // Calculate buffer sizes for our Top-K data
+  size_t top_tokens_size = top_tokens ? (count * top_k * sizeof(int32_t)) : 0;
+  size_t top_probs_size = top_probs ? (count * top_k * sizeof(float)) : 0;
+
   size_t payload_len = json_payload ? strlen(json_payload) : 0;
   size_t payload_bytes = json_payload ? payload_len + 1 : 0;
 
-  void *ptr = malloc(struct_size + tokens_size + payload_bytes);
-  if (!ptr)
-    return;
+  // Allocate one contiguous block of memory for ultimate speed
+  void *ptr = malloc(struct_size + tokens_size + top_tokens_size + top_probs_size + payload_bytes);
+  if (!ptr) return;
 
   StreamPayload *payload = (StreamPayload *)ptr;
   payload->token_count = count;
+  payload->top_k = top_k;
   payload->is_done = is_done;
   payload->is_error = is_error;
   payload->payload_len = payload_len;
 
-  if (tokens_size > 0 && tokens)
-  {
-    payload->tokens = (int32_t *)((char *)ptr + struct_size);
+  char *cursor = (char *)ptr + struct_size;
+
+  if (tokens_size > 0) {
+    payload->tokens = (int32_t *)cursor;
     memcpy(payload->tokens, tokens, tokens_size);
-  }
-  else
-  {
-    payload->tokens = NULL;
+    cursor += tokens_size;
+  } else { payload->tokens = NULL; }
+
+  if (top_tokens_size > 0) {
+    payload->top_tokens = (int32_t *)cursor;
+    memcpy(payload->top_tokens, top_tokens, top_tokens_size);
+    cursor += top_tokens_size;
+
+    payload->top_probs = (float *)cursor;
+    memcpy(payload->top_probs, top_probs, top_probs_size);
+    cursor += top_probs_size;
+  } else {
+    payload->top_tokens = NULL;
+    payload->top_probs = NULL;
   }
 
   if (payload_bytes > 0)
