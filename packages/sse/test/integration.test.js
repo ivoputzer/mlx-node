@@ -88,7 +88,7 @@ describe('mlx-sse', () => {
   })
 
   describe('POST /v1/completions', () => {
-    it('should successfully handle a standard text completion', async () => {
+    it('successfully handles a standard text completion', async () => {
       const prompt = 'Once upon a time,'
       const res = await request('/v1/completions', { model, prompt, max_tokens: 10 })
 
@@ -97,14 +97,14 @@ describe('mlx-sse', () => {
       ok(res.data.choices[0].text !== undefined, 'Expected "text" in choices')
     })
 
-    it('should return 400 Bad Request if prompt is missing', async () => {
+    it('responds with 400 Bad Request if prompt is missing or empty', async () => {
       const res = await request('/v1/completions', { model })
 
       ok(res.status === 400 || res.status === 422, `Expected 400 or 422, got ${res.status}`)
       ok(res.data.error, 'Expected an error object in the response body')
     })
 
-    it('should stream legacy completions via SSE successfully', async () => {
+    it('successfully streams legacy completions via SSE', async () => {
       const prompt = 'The numbers 1 to 3 are:'
       const res = await streamRequest('/v1/completions', { model, prompt, max_tokens: 10 })
 
