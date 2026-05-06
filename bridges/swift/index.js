@@ -16,7 +16,7 @@ function parseSafe (json, fallback = null) {
 
 function configFrom (config) {
   if (config.chunkSize > 2147483647) throw new Error('ChunkSize exceeds INT32_MAX')
-  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['stopTokenIds', 'padTokenId', 'batchSize', 'chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
+  return JSON.stringify(Object.fromEntries(Object.entries(config).filter(([key]) => ['topLogits', 'stopTokenIds', 'padTokenId', 'batchSize', 'chunkSize', 'maxTokens', 'maxKVSize', 'kvBits', 'kvGroupSize', 'quantizedKVStart', 'temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'repetitionContextSize', 'presencePenalty', 'presenceContextSize', 'frequencyPenalty', 'frequencyContextSize', 'prefillStepSize'].includes(key))))
 }
 
 // CLASSES (this will be moved to mlx-node later, so that we can share them with mlx-cpp)
@@ -50,6 +50,77 @@ export class MLXTask extends MLXResource {
   }
 }
 
+export class MLXStream extends MLXTask {
+  #queue = []
+  #resolvers = null
+  #batchSize = 1
+
+  constructor (taskPointer, batchSize) {
+    super(taskPointer)
+    this.#batchSize = batchSize
+  }
+
+  // Called from the C-Callback
+  _push (event) {
+    this.#queue.push(event)
+    if (this.#resolvers) {
+      this.#resolvers.resolve()
+      this.#resolvers = null
+    }
+  }
+
+  // GC-Friendly Unpacker
+  * _unpackTicks (buffer, topTokens, topProbs, topK) {
+    const ticks = buffer.length / this.#batchSize
+    for (let i = 0; i < ticks; i++) {
+      const start = i * this.#batchSize
+      const tickTokens = Array.from(buffer.slice(start, start + this.#batchSize))
+
+      if (topK > 0 && topTokens && topProbs) {
+        tickTokens.topLogits = []
+        for (let s = 0; s < this.#batchSize; s++) {
+          const tokenIdx = start + s
+          const sequenceTops = []
+          for (let k = 0; k < topK; k++) {
+            const idx = (tokenIdx * topK) + k
+            sequenceTops.push({ id: topTokens[idx], prob: topProbs[idx] })
+          }
+          tickTokens.topLogits.push(sequenceTops)
+        }
+      } else {
+        tickTokens.topLogits = null
+      }
+
+      yield tickTokens
+    }
+  }
+
+  async * [Symbol.asyncIterator] () {
+    try {
+      while (true) {
+        if (this.#queue.length === 0) {
+          this.#resolvers = Promise.withResolvers()
+          await this.#resolvers.promise // Sleep until _push wakes us up
+        }
+
+        // Process everything currently in the queue
+        const events = this.#queue.splice(0, this.#queue.length)
+        for (const { error, tokens, topTokens, topProbs, topK, done, json } of events) {
+          if (error) throw error
+          if (done) return parseSafe(json)
+          if (tokens) {
+            // Yield synchronous arrays directly (Zero nested async overhead)
+            yield * this._unpackTicks(tokens, topTokens, topProbs, topK)
+          }
+        }
+      }
+    } finally {
+      this.abort()
+      this.dispose()
+    }
+  }
+}
+
 export class MLXEvaluate extends MLXTask {
   #promise
 
@@ -74,58 +145,83 @@ export class MLXEvaluate extends MLXTask {
   }
 }
 
-export class MLXGenerate extends MLXTask {
-  #queue = []
-  #wakeup = () => {} // noop
+export class MLXGenerate extends MLXStream {
+  // #queue = []
+  // #wakeup = () => {} // noop
 
-  #batchSize = 1
-  #chunkSize = 5
+  // #batchSize = 1
+  // #chunkSize = 5
 
-  constructor (model, cache, tokens, options = { chunkSize: 5, batchSize: 1 }) {
+  constructor (model, cache, tokens, options = {}) {
     super(
-      mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, tokens, done, json) => {
-        this.#push({ error, tokens, done, json })
-      })
+      mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (err, tok, topTok, topProb, k, done, json) => {
+        this._push({ error: err, tokens: tok, topTokens: topTok, topProbs: topProb, topK: k, done, json })
+      }),
+      options.batchSize ?? 1
     )
-    this.#batchSize = options?.batchSize ?? 1
-    this.#chunkSize = options?.chunkSize ?? 5
   }
 
-  #push (event) {
-    this.#queue.push(event)
-    this.#wakeup() // promise is immutable once settled, should not require to set to null | noop after first call
-  }
+  // _constructor (model, cache, tokens, options = { chunkSize: 5, batchSize: 1 }) {
+  //   Function.prototype(
+  //     mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, tokens, topTokens, topProbs, topK, done, json) => {
+  //       let formattedTopLogits = null
+  //       if (topK > 0 && topTokens && topProbs) {
+  //         formattedTopLogits = []
+  //         // Group the flat arrays by batch size and topK
+  //         for (let b = 0; b < tokens.length; b++) {
+  //           const sequenceTops = []
+  //           for (let k = 0; k < topK; k++) {
+  //             const idx = (b * topK) + k
+  //             sequenceTops.push({ id: topTokens[idx], prob: topProbs[idx] })
+  //           }
+  //           formattedTopLogits.push(sequenceTops)
+  //         }
+  //       }
 
-  async * [Symbol.asyncIterator] () {
-    try {
-      while (true) {
-        if (this.#queue.length === 0) {
-          const { promise, resolve } = Promise.withResolvers()
-          this.#wakeup = resolve
-          await promise // sleep
-        }
-        for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
-          if (error) throw error
-          if (done) return parseSafe(json)
-          if (tokens) {
-            // Replicate the 'yield *' behavior:
-            // Unpack the C flat buffer into discrete ticks (time-steps)
-            // Each yield represents ONE tick containing an array of tokens (one per sequence).
-            yield * (function * (buffer, batchSize) {
-              const ticks = buffer.length / batchSize
-              for (let i = 0; i < ticks; i++) {
-                // Slice exactly 1 time-step across all sequences
-                yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
-              }
-            })(tokens, this.#batchSize)
-          }
-        }
-      }
-    } finally {
-      this.abort()
-      this.dispose()
-    }
-  }
+  //       console.log('formattedTopLogits:', done, formattedTopLogits)
+
+  //       this.#push({ error, tokens, topLogits: formattedTopLogits, done, json })
+  //     })
+  //   )
+  //   this.#batchSize = options?.batchSize ?? 1
+  //   this.#chunkSize = options?.chunkSize ?? 5
+  // }
+
+  // #push (event) {
+  //   this.#queue.push(event)
+  //   this.#wakeup() // promise is immutable once settled, should not require to set to null | noop after first call
+  // }
+
+  // async * [Symbol.asyncIterator] () {
+  //   try {
+  //     while (true) {
+  //       if (this.#queue.length === 0) {
+  //         const { promise, resolve } = Promise.withResolvers()
+  //         this.#wakeup = resolve
+  //         await promise // sleep
+  //       }
+  //       for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
+  //         if (error) throw error
+  //         if (done) return parseSafe(json)
+  //         if (tokens) {
+  //           // Replicate the 'yield *' behavior:
+  //           // Unpack the C flat buffer into discrete ticks (time-steps)
+  //           // Each yield represents ONE tick containing an array of tokens (one per sequence).
+  //           yield * (function * (buffer, batchSize) {
+  //             const ticks = buffer.length / batchSize
+  //             for (let i = 0; i < ticks; i++) {
+  //               // Slice exactly 1 time-step across all sequences
+  //               yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
+  //             }
+  //           })(tokens, this.#batchSize)
+  //         }
+  //       }
+  //     }
+  //   } finally {
+  //     this.abort()
+  //     this.dispose()
+  //   }
+  // }
 }
 
 export class MLXTarget extends MLXResource {
