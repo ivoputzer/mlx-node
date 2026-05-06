@@ -1,5 +1,8 @@
 .DS_Store
-
+.geminiignore
+.gemini/
+.build/
+.swiftpm/
 .vscode/
 .trash/
 
@@ -9,3 +12,4 @@ todo/
 bugs*.md
 todo*.md
 prompt*.md
+
