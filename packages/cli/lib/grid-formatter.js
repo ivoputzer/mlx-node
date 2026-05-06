@@ -293,7 +293,7 @@ const ANSI = {
   moveUp: (n) => `\x1b[${n}A`
 }
 
-export function printBatchHeaders (batchSize, options = {}) {
+export function createBatchHeaders (batchSize, options = {}) {
   const titles = options.titles || Array.from({ length: batchSize }, (_, i) => `Stream ${i + 1}`)
   const terminalWidth = process.stdout.columns || 120
   const gap = 3
@@ -320,7 +320,7 @@ export function printBatchHeaders (batchSize, options = {}) {
       headers += `\x1b[${p.pos}G\x1b[2m │ \x1b[0m`
     }
   }
-  process.stdout.write('\r\x1b[K' + headers + '\n')
+  return '\r\x1b[K' + headers + '\n'
 }
 
 export function createBatchRenderer (batchSize, options = {}) {
