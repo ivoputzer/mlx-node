@@ -2,6 +2,7 @@
 .geminiignore
 .gemini/
 .build/
+.zed/
 .swiftpm/
 .vscode/
 .trash/
@@ -12,4 +13,3 @@ todo/
 bugs*.md
 todo*.md
 prompt*.md
-
