@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import fs from 'node:fs/promises'
 import mlx from 'mlx-node/swift'
 
 import * as tokenizers from '@huggingface/tokenizers'
@@ -298,15 +298,29 @@ export async function loadTokenizer (path, { Tokenizer } = tokenizers) {
   return new Tokenizer(tokenizerJson, tokenizerConfigJson)
 }
 
-export async function loadTemplate (path, { Template } = jinja) {
-  // todo: maybe check if path is a directory or a file, if it's a file we might load the file directly?
-  const tokenizerConfigPath = join(path, 'tokenizer_config.json')
-  const templatePath = join(path, 'chat_template.jinja')
+export async function loadTemplate (path, { config }, { Template } = jinja, { readFile } = fs) {
   try {
-    return new Template(await readFile(templatePath, 'utf8'))
+    return new Template(await readFile(join(path, 'chat_template.jinja'), 'utf8'))
   } catch {
-    // this is just a lazy fallback if there's a template it should be there and we shouldn't even have to read this file (again)
-    return new Template(JSON.parse(await readFile(tokenizerConfigPath, 'utf8'))?.chat_template)
+    if (!config?.chat_template?.length) {
+      throw new Error('No valid template found in model path.')
+    }
+    if (Array.isArray(config.chat_template)) {
+      const templates = config.chat_template.reduce((templates, { name, template }) => ({ ...templates, [name]: new Template(template) }), {})
+      return {
+        render (context) {
+          try {
+            return context?.tools?.length && templates?.tool_use
+              ? templates?.tool_use.render(context)
+              : templates?.default.render(context)
+          } catch {
+            throw new Error('No valid template found in tokenizer config.')
+          }
+        }
+      }
+    } else {
+      return new Template(config.chat_template)
+    }
   }
 }
 
