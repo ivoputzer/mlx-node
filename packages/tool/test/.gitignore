@@ -1,3 +1,1 @@
-models/**
-!models/readme.md
-!models/download.sh
+models/
