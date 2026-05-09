@@ -283,7 +283,7 @@ export function stopTokensFrom (tokenizer) {
   return Array.from(stopTokens)
 }
 
-export async function loadTokenizer (path, { Tokenizer } = tokenizers) {
+export async function loadTokenizer (path, { Tokenizer } = tokenizers, { readFile } = fs) {
   const tokenizerPath = join(path, 'tokenizer.json')
   const tokenizerConfigPath = join(path, 'tokenizer_config.json')
 
@@ -324,7 +324,7 @@ export async function loadTemplate (path, { config }, { Template } = jinja, { re
   }
 }
 
-export async function loadOptions (path) {
+export async function loadOptions (path, { readFile } = fs) {
   const configPath = join(path, 'config.json')
   const generationConfigPath = join(path, 'generation_config.json')
 
@@ -342,6 +342,7 @@ export async function loadOptions (path) {
 export async function loadModel (path) {
   const tokenizer = await loadTokenizer(path)
   const template = await loadTemplate(path)
+
   return MLXModel.loadFrom(path)
 }
 
