@@ -7,10 +7,12 @@
     "packages/*",
     "meta/*"
   ],
-  "standard":{
-    "enabled": "true"
-  },
   "scripts": {
-    "test": "npm test --workspaces"
+    "test": "npm test --workspaces",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.39.4",
+    "neostandard": "^0.13.0"
   }
 }

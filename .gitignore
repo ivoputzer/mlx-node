@@ -6,6 +6,7 @@
 .swiftpm/
 .vscode/
 .trash/
+.models.json
 
 node_modules/
 todo/
