@@ -1,13 +1,12 @@
 import http from 'node:http'
-import fs, { readFile } from 'node:fs/promises'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { parseArgs } from 'node:util'
 
-import { MLXModel, MLXCache, MLXMetrics } from 'mlx-swift'
+import { MLXModel, MLXCache } from 'mlx-swift'
 import { loadTokenizer, loadTemplate, stopTokensFrom, padTokenFrom } from 'mlx-lm'
 import { analyzeToolMarkers } from 'mlx-tool'
-import { expand } from '../lm/lib/fs.js'
 
 // ============================================================================
 // CONFIGURATION & CLI ARGUMENTS
@@ -17,12 +16,22 @@ const { values: args } = parseArgs({
   options: {
     port: { type: 'string', short: 'p', default: '8080' },
     host: { type: 'string', short: 'h', default: '127.0.0.1' },
-    model: { type: 'string', short: 'm', multiple: true, default: [] }
+    model: { type: 'string', short: 'm', multiple: true, default: [] },
+    verbose: { type: 'boolean', short: 'v', default: false } // Added verbose flag
   }
 })
 
 const CACHE_DIR = path.join(process.cwd(), '.mlx_sessions')
 await fs.mkdir(CACHE_DIR, { recursive: true }).catch(() => {})
+
+// Standardized Logger
+const log = {
+  info: (...msg) => console.log('[INFO]', ...msg),
+  verb: (...msg) => { if (args.verbose) console.log('[DEBUG]', ...msg) },
+  error: (...msg) => console.error('[ERROR]', ...msg)
+}
+
+if (args.verbose) log.info('Verbose logging enabled. Expect detailed output.')
 
 // ============================================================================
 // UTILITIES
@@ -75,51 +84,58 @@ function getPartialMatchLen (buffer, target) {
 // ============================================================================
 
 function createSessionManager ({ cacheDir }) {
-  const sessions = new Map()
+  const activeSessions = new Map()
 
   async function getOrCreate (sessionId, modelConfig) {
     const { model, name: modelName } = modelConfig
     const sessionKey = crypto.createHash('sha256').update(`${sessionId}_${modelName}`).digest('hex').slice(0, 16)
     const diskPath = path.join(cacheDir, sessionKey)
 
-    if (sessions.has(sessionKey)) {
-      const session = sessions.get(sessionKey)
-      session.lastAccess = Date.now()
+    // 1. Return from VRAM if currently active
+    if (activeSessions.has(sessionKey)) {
+      const session = activeSessions.get(sessionKey)
+      clearTimeout(session.gcTimer) // Prevent eviction while in use
+      log.verb(`[Cache] Reusing active VRAM session: ${sessionKey}`)
       return session
     }
 
+    // 2. Hydrate from Disk (Very fast on Unified Memory)
+    let cache; let historyTokens = []
     try {
       await fs.access(`${diskPath}.safetensors`)
-      const cache = await MLXCache.fromPath(`${diskPath}.safetensors`, model)
+      cache = await MLXCache.fromPath(`${diskPath}.safetensors`, model)
       const meta = JSON.parse(await fs.readFile(`${diskPath}.meta.json`, 'utf8'))
-      const session = { cache, historyTokens: meta.historyTokens, lastAccess: Date.now(), diskPath, key: sessionKey }
-      sessions.set(sessionKey, session)
-      return session
+      historyTokens = meta.historyTokens
+      log.verb(`[Cache] Restored session from disk to VRAM: ${sessionKey} (${historyTokens.length} tokens)`)
     } catch {
-      const cache = MLXCache.fromModel(model)
-      const session = { cache, historyTokens: [], lastAccess: Date.now(), diskPath, key: sessionKey }
-      sessions.set(sessionKey, session)
-      return session
+      // 3. Fallback to entirely new Cache
+      cache = MLXCache.fromModel(model)
+      log.verb(`[Cache] Created fresh empty session: ${sessionKey}`)
     }
+
+    const session = { cache, historyTokens, diskPath, key: sessionKey }
+    activeSessions.set(sessionKey, session)
+    return session
   }
 
-  async function save (session) {
+  async function saveAndRelease (session) {
     if (!session || !session.cache.available) return
+
+    // Immediately persist state to disk just in case
     await session.cache.save(`${session.diskPath}.safetensors`)
     await fs.writeFile(`${session.diskPath}.meta.json`, JSON.stringify({ historyTokens: session.historyTokens }))
-  }
 
-  function runGC (maxIdleTimeMs = 30 * 60 * 1000) {
-    const now = Date.now()
-    for (const [key, session] of sessions.entries()) {
-      if (session.cache.available && now - session.lastAccess > maxIdleTimeMs) {
+    // Aggressive FS Strategy: 15 seconds of idle time = Evict from VRAM
+    session.gcTimer = setTimeout(() => {
+      if (session.cache.available) {
         session.cache.dispose()
-        console.log(`[GC] Evicted session ${key.slice(0, 8)} from VRAM.`)
+        activeSessions.delete(session.key)
+        log.info(`[GC] Evicted session ${session.key} from VRAM to disk to save memory.`)
       }
-    }
+    }, 15000)
   }
 
-  return { getOrCreate, save, runGC }
+  return { getOrCreate, saveAndRelease }
 }
 
 // ============================================================================
@@ -139,11 +155,16 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
     commonPrefixLen++
   }
 
-  // Append-only cache strategy
+  log.verb(`[Context] Match: ${commonPrefixLen} tokens. New: ${targetTokens.length - commonPrefixLen} tokens.`)
+
+  // STRICT APPEND-ONLY BEHAVIOR
   if (commonPrefixLen < session.historyTokens.length) {
+    log.verb(`[Context] History diverged (Cached: ${session.historyTokens.length}, Matched: ${commonPrefixLen}). Dropping entire cache due to append-only rule!`)
     session.cache.dispose()
     session.cache = MLXCache.fromModel(model)
     commonPrefixLen = 0
+  } else if (commonPrefixLen > 0) {
+    log.verb('[Context] Successfully appending to existing cache.')
   }
 
   session.historyTokens = Array.from(targetTokens)
@@ -209,7 +230,7 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
       const textChunk = tokenizer.decode([tokenId], { skip_special_tokens: false })
       branch.textBuffer += textChunk
 
-      // Reasoning Trailing Match
+      // Reasoning
       if (!branch.inThinkBlock && !branch.inToolBlock && branch.textBuffer.includes(THINK_START)) {
         const startIdx = branch.textBuffer.indexOf(THINK_START)
         const before = branch.textBuffer.slice(0, startIdx)
@@ -238,7 +259,7 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
         }
       }
 
-      // Tool Trailing Match
+      // Tool
       if (!branch.inToolBlock && triggerStart && branch.textBuffer.includes(triggerStart)) {
         const startIdx = branch.textBuffer.indexOf(triggerStart)
         const before = branch.textBuffer.slice(0, startIdx)
@@ -264,7 +285,7 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
         continue
       }
 
-      // Flush Safe Text Buffer
+      // Safe Text Output
       const partialLen = Math.max(getPartialMatchLen(branch.textBuffer, THINK_START), triggerStart ? getPartialMatchLen(branch.textBuffer, triggerStart) : 0)
       if (partialLen === 0) {
         yield { branchIndex: i, type: 'text', text: branch.textBuffer }
@@ -276,11 +297,22 @@ async function * generateMLXStream (session, fullPromptString, modelConfig, opti
     }
   }
 
+  // Verbose Output for MLX Hardware Stats
+  if (args.verbose && mlxStats) {
+    log.verb('\n--- Generation Stats ---')
+    log.verb(`TTFT (Prompt Eval): ${mlxStats.promptTime?.toFixed(2)}s (${mlxStats.promptTokensPerSecond?.toFixed(2)} t/s)`)
+    log.verb(`Generation Time : ${mlxStats.generateTime?.toFixed(2)}s (${mlxStats.tokensPerSecond?.toFixed(2)} t/s)`)
+    log.verb('------------------------\n')
+  }
+
   yield {
     type: 'usage',
     prompt_tokens: mlxStats?.promptTokens ?? targetTokens.length,
     completion_tokens: mlxStats?.generatedTokens ?? Math.max(...branches.map(b => b.tokens)),
-    total_tokens: (mlxStats?.promptTokens ?? targetTokens.length) + (mlxStats?.generatedTokens ?? Math.max(...branches.map(b => b.tokens)))
+    total_tokens: (mlxStats?.promptTokens ?? targetTokens.length) + (mlxStats?.generatedTokens ?? Math.max(...branches.map(b => b.tokens))),
+    time_to_first_token: mlxStats?.promptTime,
+    generation_time: mlxStats?.generateTime,
+    tokens_per_second: mlxStats?.tokensPerSecond
   }
 }
 
@@ -300,7 +332,6 @@ function createOpenAIAdapter () {
         if (!includeUsage) return null
         return `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [], usage: chunk })}\n\n`
       }
-
       const delta = {}
       if (chunk.type === 'text') delta.content = chunk.text
       if (chunk.type === 'reasoning') delta.reasoning_content = chunk.text
@@ -330,9 +361,7 @@ function createOpenAIAdapter () {
     },
 
     formatCompletionChunk: (id, model, chunk) => {
-      if (chunk.type === 'text') {
-        return `data: ${JSON.stringify({ id, object: 'text_completion', created: Math.floor(Date.now() / 1000), model, choices: [{ index: chunk.branchIndex, text: chunk.text, finish_reason: null }] })}\n\n`
-      }
+      if (chunk.type === 'text') return `data: ${JSON.stringify({ id, object: 'text_completion', created: Math.floor(Date.now() / 1000), model, choices: [{ index: chunk.branchIndex, text: chunk.text, finish_reason: null }] })}\n\n`
       return null
     },
 
@@ -387,10 +416,11 @@ function createChatCompletionHandler ({ models, sessionManager, generateStream, 
         else if (chunk.type === 'tool_finish') branches[chunk.branchIndex].tool_calls.push({ id: chunk.id, type: 'function', function: chunk.tool })
       }
       res.writeHead(200, adapter.headers.json)
+      if (args.verbose) log.verb('[Response] Sending non-streaming JSON block back to client.')
       res.end(adapter.formatChatResponse(requestId, modelConfig.name, branches, usage))
     }
 
-    await sessionManager.save(session)
+    await sessionManager.saveAndRelease(session)
   }
 }
 
@@ -424,7 +454,7 @@ function createLegacyCompletionHandler ({ models, sessionManager, generateStream
       res.end(adapter.formatCompletionResponse(requestId, modelConfig.name, branches, usage))
     }
 
-    await sessionManager.save(session)
+    await sessionManager.saveAndRelease(session)
   }
 }
 
@@ -440,7 +470,7 @@ function createRequestHandler ({ models, chatHandler, legacyHandler }) {
 
   return async (req, res) => {
     const start = Date.now()
-    res.on('finish', () => console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} ${Date.now() - start}ms`))
+    res.on('finish', () => log.info(`${req.method} ${req.url} ${res.statusCode} ${Date.now() - start}ms`))
 
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
@@ -461,11 +491,18 @@ function createRequestHandler ({ models, chatHandler, legacyHandler }) {
       req.on('end', async () => {
         try {
           const body = JSON.parse(bodyData)
+
+          if (args.verbose) {
+            log.verb(`\n--- Incoming Payload (${url.pathname}) ---`)
+            log.verb(JSON.stringify(body, null, 2))
+            log.verb('-------------------------------------------\n')
+          }
+
           if (url.pathname === '/v1/chat/completions') await chatHandler(req, res, body)
           else if (url.pathname === '/v1/completions') await legacyHandler(req, res, body)
           else sendError(res, 404, 'Endpoint not found')
         } catch (err) {
-          console.error(err)
+          log.error(err)
           sendError(res, err.message.includes('required') || err.message.includes('not found') ? 400 : 500, err.message)
         }
       })
@@ -484,34 +521,39 @@ async function boot () {
   const sessionManager = createSessionManager({ cacheDir: CACHE_DIR })
   const openAIAdapter = createOpenAIAdapter()
 
-  // Setup Dependency Injected Handlers
-  const chatHandler = createChatCompletionHandler({ models: modelsMap, sessionManager, generateStream: generateMLXStream, adapter: openAIAdapter })
-  const legacyHandler = createLegacyCompletionHandler({ models: modelsMap, sessionManager, generateStream: generateMLXStream, adapter: openAIAdapter })
-  const requestHandler = createRequestHandler({ models: modelsMap, chatHandler, legacyHandler })
+  const chatHandler = createChatCompletionHandler({
+    models: modelsMap, sessionManager, generateStream: generateMLXStream, adapter: openAIAdapter
+  })
 
-  // Start Background GC
-  setInterval(() => sessionManager.runGC(), 5 * 60 * 1000)
+  const legacyHandler = createLegacyCompletionHandler({
+    models: modelsMap, sessionManager, generateStream: generateMLXStream, adapter: openAIAdapter
+  })
 
-  // Load Models
+  const requestHandler = createRequestHandler({
+    models: modelsMap, chatHandler, legacyHandler
+  })
+
   for (const modelPath of args.model) {
-    const path = expand(modelPath)
-    const config = JSON.parse(await readFile('../../.models.json', 'utf8')).find(model => expand(model.path) === path)
-
+    const name = path.basename(modelPath)
     const tokenizer = await loadTokenizer(modelPath)
     const template = await loadTemplate(modelPath, tokenizer)
     const markers = analyzeToolMarkers(template, tokenizer)
-    const model = await MLXModel.fromPath(modelPath)
 
-    modelsMap.set(modelPath, { ...config, model, tokenizer, template, markers, stopTokens: stopTokensFrom(tokenizer), padTokenId: padTokenFrom(tokenizer) })
-    modelsMap.set(config.name, modelsMap.get(modelPath)) // Allow lookup by basename too
-
-    console.log(`✅ Loaded: ${config.name} (Tool Topology: ${markers.topology || markers.type})`)
-    console.log(MLXMetrics.fromSnapshot())
+    modelsMap.set(modelPath, {
+      name,
+      model: await MLXModel.fromPath(modelPath),
+      tokenizer,
+      template,
+      markers,
+      stopTokens: stopTokensFrom(tokenizer),
+      padTokenId: padTokenFrom(tokenizer)
+    })
+    modelsMap.set(name, modelsMap.get(modelPath))
+    log.info(`✅ Loaded: ${name} (Tool Topology: ${markers.topology || markers.type})`)
   }
 
-  // Start Server
   const server = http.createServer(requestHandler)
-  server.listen(args.port, args.host, () => console.log(`🚀 MLX API Server running on http://${args.host}:${args.port}`))
+  server.listen(args.port, args.host, () => log.info(`🚀 MLX API Server running on http://${args.host}:${args.port}`))
 }
 
-boot().catch(console.error)
+boot().catch(log.error)
