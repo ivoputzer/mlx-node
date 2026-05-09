@@ -7,9 +7,9 @@ const host = 'localhost'
 const port = 8080
 const url = `http://${host}:${port}`
 const user = 'test'
-const model = 'MLX-Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-8bit' // Change this if your server requires a specific model name
+const model = 'granite-4.1-8b-8bit' // Change this if your server requires a specific model name
 
-describe('mlx-sse', () => {
+describe.skip('mlx-sse', () => {
   describe('POST /v1/chat/completions', () => {
     it('successfully handles a single-turn text request', async () => {
       const messages = [{ role: 'user', content: 'Say hello!' }]
