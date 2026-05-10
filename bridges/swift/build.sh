@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-LIB_NAME="MLXBridge" # FIXME: This needs to be renamed to MLXBridge at some point 😂
+LIB_NAME="MLXBridge"
 
 echo "🧹 Cleaning old caches..."
 # rm -rf .build
@@ -41,6 +41,8 @@ if [ -z "$LIB_PATH" ]; then
 fi
 
 NODE_INCLUDE=$(node -pe "path.join(process.execPath, '..', '..', 'include', 'node')")
+NPM_PACKAGE_VERSION=$(node -p "require('./package.json').version")
+echo "📦 Package version identified as: $NPM_PACKAGE_VERSION"
 
 echo "🔗 Linking Node-API Bridge (Forced Static)..."
-clang -O3 -shared -I"$NODE_INCLUDE" binding.c "$LIB_PATH" -o ./mlx.node -undefined dynamic_lookup -L/usr/lib/swift -mmacosx-version-min=14.0
+clang -O3 -shared -DNPM_PACKAGE_VERSION="\"$NPM_PACKAGE_VERSION\"" -I"$NODE_INCLUDE" binding.c "$LIB_PATH" -o ./mlx.node -undefined dynamic_lookup -L/usr/lib/swift -mmacosx-version-min=14.0

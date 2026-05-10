@@ -642,7 +642,11 @@ napi_value init(napi_env env, napi_value exports)
     }
   }
 
+  napi_value package_version;
+  napi_create_string_utf8(env, NPM_PACKAGE_VERSION, NAPI_AUTO_LENGTH, &package_version);
+
   napi_property_descriptor desc[] = {
+      {"version", NULL, NULL, NULL, NULL, package_version, napi_enumerable, NULL},
       {"freeResource", NULL, Export_ResourceFree, NULL, NULL, NULL, napi_default, NULL},
 
       {"createCache", NULL, Export_CacheCreate, NULL, NULL, NULL, napi_default, NULL},
@@ -663,7 +667,7 @@ napi_value init(napi_env env, napi_value exports)
       {"systemClearCache", NULL, Export_SystemClearCache, NULL, NULL, NULL, napi_default, NULL},
   };
 
-  napi_define_properties(env, exports, 15, desc);
+  napi_define_properties(env, exports, 16, desc);
   return exports;
 }
 

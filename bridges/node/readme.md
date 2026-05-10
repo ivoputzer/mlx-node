@@ -3,7 +3,7 @@ mlx-node
 
 The primary Native Bridge aggregator for Apple's MLX framework on Node.js.
 
-`mlx-node` acts as the router between JavaScript and the native Apple Silicon GPU drivers. It automatically resolves and exports the best available low-level bridge (`mlx-swift` or `mlx-cpp`) for your environment.
+`mlx-node` acts as the router between JavaScript and the native Apple Silicon GPU drivers. It automatically resolves and exports the best available low-level bridge (`mlx-swift` or `mlx-cpp`) for your environment. This library wraps the low-level bindings into standard Node.js concepts: Classes, Promises, and Async Iterators. It ensures memory safety and provides a clean JavaScript API for executing LLMs and generating text streams on Apple Silicon GPUs.
 
 > **Note to Developers:**
 > Unless you are building custom AI framework tooling, you probably don't want to use this package directly. For generating text or running models, use [**`mlx-lm`**](https://www.npmjs.com/package/mlx-lm) instead!
