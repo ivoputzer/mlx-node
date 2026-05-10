@@ -16,13 +16,14 @@ describe('mlx-swift', () => {
   })
 
   it('should maintain functional parity with native methods', () => {
-    strictEqual(mlx.version, require('./package.json').version, 'Native method call failed through driver')
+    const { version } = require('./package.json')
+    strictEqual(mlx.version, version, 'Native method call failed through driver')
   })
 
   describe('Mocking Capabilities', () => {
     it('should allow mocking methods', ({ mock }) => {
-      mock.method(mlx, 'systemMetrics', () => ({ mocked: true }))
-      deepEqual(mlx.systemMetrics(), { mocked: true }, 'The method was not successfully mocked')
+      mock.method(mlx, 'systemMetrics', Function.prototype)
+      strictEqual(mlx.systemMetrics(), undefined, 'The method was not successfully mocked')
       strictEqual(mlx.systemMetrics.mock.calls.length, 1)
     })
 
