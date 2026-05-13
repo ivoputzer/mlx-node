@@ -278,11 +278,6 @@ export class IncrementalGridFormatter {
   }
 }
 
-function getVisualWidth (str) {
-  // Simplistic width for headers
-  return stripVTControlCharacters(str).length // (Can reuse the robust segmenter here)
-}
-
 const ANSI = {
   HIDE_CURSOR: '\x1b[?25l',
   SHOW_CURSOR: '\x1b[?25h',
