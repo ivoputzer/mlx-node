@@ -1,5 +1,5 @@
 import { describe, it } from 'node:test'
-import { deepStrictEqual, ok, rejects, strictEqual } from 'node:assert'
+import { ok, strictEqual } from 'node:assert'
 
 import mlx from 'mlx-swift'
 import { MLXMetrics } from '../index.js'
