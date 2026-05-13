@@ -8,8 +8,9 @@
     "meta/*"
   ],
   "scripts": {
+    "download": "cd models && bash download.sh",
     "test": "npm test --workspaces",
-    "lint": "eslint ."
+    "eslint": "eslint"
   },
   "devDependencies": {
     "eslint": "^9.39.4",
