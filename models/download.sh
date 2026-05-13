@@ -21,6 +21,10 @@ grep -o 'https://huggingface.co/[^ /]*/[^ /]*' "$INPUT_FILE" | xargs -n 1 -P 1 b
     )
 
     for FILE in "${FILES[@]}"; do
+        if [[ -f "$DIR_NAME/$FILE" ]]; then
+            echo "  ⏩ Skipping $FILE (already exists)"
+            continue
+        fi
         DL_URL="$REPO_URL/resolve/main/$FILE"
         if curl --output /dev/null --silent --head --fail "$DL_URL"; then
             echo "  ✅ Downloading $FILE -> $DIR_NAME"
