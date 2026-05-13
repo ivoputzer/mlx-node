@@ -1,5 +1,5 @@
 import { describe, it } from 'node:test'
-import { ok, deepEqual, strictEqual } from 'node:assert/strict'
+import { ok, strictEqual } from 'node:assert/strict'
 import { createRequire } from 'node:module'
 
 import mlx from 'mlx-swift' // Adjust path to your file
