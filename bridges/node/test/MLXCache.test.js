@@ -4,8 +4,9 @@ import { strictEqual, ok, deepStrictEqual } from 'node:assert'
 import mlx from 'mlx-swift'
 import { MLXCache, MLXModel } from '../index.js'
 
-describe('MLXCache', () => {
+describe('MLXCache', ({ mock }) => {
   it('creates cache from an existing model', ({ mock }) => {
+    mock.method(mlx, 'debugCache', () => '{}')
     mock.method(mlx, 'createCache', (modelRef, configJson) => {
       strictEqual(modelRef.pointer, 1)
       deepStrictEqual(JSON.parse(configJson), { kvBits: 8 })
@@ -21,6 +22,7 @@ describe('MLXCache', () => {
   })
 
   it('loads cache from path', async ({ mock }) => {
+    mock.method(mlx, 'debugCache', () => '{}')
     mock.method(mlx, 'loadCache', (path, callback) => {
       strictEqual(path, '/cache/path')
       callback(null, { pointer: 2 })
@@ -32,6 +34,7 @@ describe('MLXCache', () => {
   })
 
   it('saves cache to path', async ({ mock }) => {
+    mock.method(mlx, 'debugCache', () => '{}')
     mock.method(mlx, 'saveCache', (ref, path, callback) => {
       strictEqual(path, '/save/path')
       callback(null)

@@ -241,10 +241,20 @@ static AsyncContext *SetupAsyncPipeline(napi_env env, napi_value js_callback, co
 // 6. STREAM PIPELINE (GENERATION TASKS)
 // ============================================================================
 
+// V8 Garbage Collection Hook: Triggered when V8 destroys the External ArrayBuffer
+static void GC_FinalizeStreamPayload(napi_env env, void *finalize_data, void *finalize_hint)
+{
+  (void)env;
+  (void)finalize_hint;
+  // Free the single malloc'd block that originated from Swift_OnStreamEvent
+  free(finalize_data);
+}
+
 static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context, void *data)
 {
   (void)context;
   StreamPayload *payload = (StreamPayload *)data;
+  bool v8_owns_memory = false; // Track if V8 took ownership of the pointer
 
   if (env != NULL && js_callback != NULL)
   {
@@ -267,32 +277,43 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
     else
     {
       argv[0] = js_null;
+
       if (payload->token_count > 0 && payload->tokens != NULL)
       {
-        void *array_data;
-        napi_value arraybuffer;
-        napi_create_arraybuffer(env, payload->token_count * sizeof(int32_t), &array_data, &arraybuffer);
-        memcpy(array_data, payload->tokens, payload->token_count * sizeof(int32_t));
-        napi_create_typedarray(env, napi_int32_array, payload->token_count, arraybuffer, 0, &argv[1]);
+        // 1. Calculate the exact total size of our malloc block
+        size_t struct_size = sizeof(StreamPayload);
+        size_t tokens_size = payload->token_count * sizeof(int32_t);
+        size_t top_tokens_size = payload->top_tokens ? (payload->token_count * payload->top_k * sizeof(int32_t)) : 0;
+        size_t top_probs_size = payload->top_probs ? (payload->token_count * payload->top_k * sizeof(float)) : 0;
+        size_t payload_bytes = payload->payload ? payload->payload_len + 1 : 0;
+        size_t total_size = struct_size + tokens_size + top_tokens_size + top_probs_size + payload_bytes;
+
+        // 2. Zero-Copy: Hand the entire C-pointer directly to V8
+        napi_value v8_buffer;
+        napi_create_external_arraybuffer(env, payload, total_size, GC_FinalizeStreamPayload, NULL, &v8_buffer);
+        v8_owns_memory = true; // V8 is now responsible for free() via GC!
+
+        // 3. Create TypedArray Views mapping EXACTLY to our C-memory offsets
+        size_t tokens_offset = (char *)payload->tokens - (char *)payload;
+        napi_create_typedarray(env, napi_int32_array, payload->token_count, v8_buffer, tokens_offset, &argv[1]);
+
+        if (payload->top_k > 0 && payload->top_tokens != NULL)
+        {
+          size_t top_tokens_offset = (char *)payload->top_tokens - (char *)payload;
+          napi_create_typedarray(env, napi_int32_array, payload->token_count * payload->top_k, v8_buffer, top_tokens_offset, &argv[2]);
+
+          size_t top_probs_offset = (char *)payload->top_probs - (char *)payload;
+          napi_create_typedarray(env, napi_float32_array, payload->token_count * payload->top_k, v8_buffer, top_probs_offset, &argv[3]);
+        }
+        else
+        {
+          argv[2] = js_null;
+          argv[3] = js_null;
+        }
       }
       else
       {
         argv[1] = js_null;
-      }
-
-      if (payload->top_k > 0 && payload->top_tokens != NULL) {
-        void *top_tok_data;
-        napi_value top_tok_buffer;
-        napi_create_arraybuffer(env, payload->token_count * payload->top_k * sizeof(int32_t), &top_tok_data, &top_tok_buffer);
-        memcpy(top_tok_data, payload->top_tokens, payload->token_count * payload->top_k * sizeof(int32_t));
-        napi_create_typedarray(env, napi_int32_array, payload->token_count * payload->top_k, top_tok_buffer, 0, &argv[2]);
-
-        void *top_prob_data;
-        napi_value top_prob_buffer;
-        napi_create_arraybuffer(env, payload->token_count * payload->top_k * sizeof(float), &top_prob_data, &top_prob_buffer);
-        memcpy(top_prob_data, payload->top_probs, payload->token_count * payload->top_k * sizeof(float));
-        napi_create_typedarray(env, napi_float32_array, payload->token_count * payload->top_k, top_prob_buffer, 0, &argv[3]);
-      } else {
         argv[2] = js_null;
         argv[3] = js_null;
       }
@@ -303,7 +324,12 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
     }
     napi_call_function(env, global, js_callback, 7, argv, NULL);
   }
-  free(payload);
+
+  // If V8 didn't take ownership (e.g., error state or no tokens), free manually to prevent leaks
+  if (!v8_owns_memory)
+  {
+    free(payload);
+  }
 }
 
 static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t count, const int32_t *top_tokens, const float *top_probs, int32_t top_k, bool is_done, bool is_error, const char *json_payload)
@@ -312,15 +338,11 @@ static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t co
 
   size_t struct_size = sizeof(StreamPayload);
   size_t tokens_size = count > 0 ? count * sizeof(int32_t) : 0;
-
-  // Calculate buffer sizes for our Top-K data
   size_t top_tokens_size = top_tokens ? (count * top_k * sizeof(int32_t)) : 0;
   size_t top_probs_size = top_probs ? (count * top_k * sizeof(float)) : 0;
-
   size_t payload_len = json_payload ? strlen(json_payload) : 0;
   size_t payload_bytes = json_payload ? payload_len + 1 : 0;
 
-  // Allocate one contiguous block of memory for ultimate speed
   void *ptr = malloc(struct_size + tokens_size + top_tokens_size + top_probs_size + payload_bytes);
   if (!ptr) return;
 
@@ -364,6 +386,7 @@ static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t co
 
   if (napi_call_threadsafe_function(tsfn, payload, napi_tsfn_nonblocking) != napi_ok)
     free(payload);
+
   if (is_done)
     napi_release_threadsafe_function(tsfn, napi_tsfn_release);
 }

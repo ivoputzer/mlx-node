@@ -26,8 +26,8 @@ describe('MLXGenerate', () => {
     }, 10)
 
     const receivedTokens = []
-    for await (const tick of stream) {
-      receivedTokens.push(tick[0]) // tick is an array across the batch size
+    for await (const { tokens } of stream) {
+      receivedTokens.push(tokens[0]) // tick is an array across the batch size
     }
 
     deepStrictEqual(receivedTokens, [99, 100])
@@ -65,13 +65,11 @@ describe('MLXGenerate', () => {
       firstTick = tick
     }
 
-    strictEqual(firstTick[0], 42)
-    deepStrictEqual(firstTick.topLogits, [
-      [
-        { id: 42, prob: Math.fround(0.9) },
-        { id: 43, prob: Math.fround(0.1) }
-      ]
-    ])
+    strictEqual(firstTick.tokens[0], 42)
+    deepStrictEqual(firstTick.logits, [{
+      ids: new Int32Array([42, 43]),
+      probs: new Float32Array([0.9, 0.1])
+    }])
   })
 
   it('throws and aborts immediately on native stream error', async ({ mock }) => {

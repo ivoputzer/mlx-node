@@ -24,15 +24,6 @@ export class MLXResource {
 }
 
 export class MLXTask extends MLXResource {
-  static parseJson (json, fallback = null) {
-    if (!json) return fallback
-    try {
-      return JSON.parse(json)
-    } catch {
-      return fallback
-    }
-  }
-
   abort () {
     if (this.available) mlx.abortTask(this.ref)
   }
@@ -48,8 +39,7 @@ export class MLXStream extends MLXTask {
     this.#batchSize = batchSize
   }
 
-  // Called from the C-Callback
-  _push (event) {
+  push (event) {
     this.#queue.push(event)
     if (this.#resolvers) {
       this.#resolvers.resolve()
@@ -57,29 +47,29 @@ export class MLXStream extends MLXTask {
     }
   }
 
-  // GC-Friendly Unpacker
-  * _unpackTicks (buffer, topTokens, topProbs, topK) {
+  * #unpack (buffer, topTokens, topProbs, topK) {
     const ticks = buffer.length / this.#batchSize
     for (let i = 0; i < ticks; i++) {
       const start = i * this.#batchSize
-      const tickTokens = Array.from(buffer.slice(start, start + this.#batchSize))
+
+      const tokens = Array.from(buffer.subarray(start, start + this.#batchSize)) // Zero-copy read from the C-pointer
+      let logits = null
 
       if (topK > 0 && topTokens && topProbs) {
-        tickTokens.topLogits = []
+        logits = new Array(this.#batchSize)
         for (let s = 0; s < this.#batchSize; s++) {
           const tokenIdx = start + s
-          const sequenceTops = []
-          for (let k = 0; k < topK; k++) {
-            const idx = (tokenIdx * topK) + k
-            sequenceTops.push({ id: topTokens[idx], prob: topProbs[idx] })
+          // calculate the flat memory offsets for this specific token
+          const startK = tokenIdx * topK
+          const endK = startK + topK
+          // zero-copy views. No loops! No object creation per logit!
+          logits[s] = {
+            ids: topTokens.subarray(startK, endK),
+            probs: topProbs.subarray(startK, endK)
           }
-          tickTokens.topLogits.push(sequenceTops)
         }
-      } else {
-        tickTokens.topLogits = null
       }
-
-      yield tickTokens
+      yield { tokens, logits } // yield standard object to prevent V8 Dictionary Mode deopt
     }
   }
 
@@ -88,18 +78,16 @@ export class MLXStream extends MLXTask {
       while (true) {
         if (this.#queue.length === 0) {
           this.#resolvers = Promise.withResolvers()
-          await this.#resolvers.promise // Sleep until _push wakes us up
+          await this.#resolvers.promise // sleep until push wakes us up
         }
 
-        // Process everything currently in the queue
-        const events = this.#queue.splice(0, this.#queue.length)
+        const events = this.#queue
+        this.#queue = [] // O(1) queue swap, no splice gc overhead
+
         for (const { error, tokens, topTokens, topProbs, topK, done, json } of events) {
           if (error) throw error
           if (done) return parseJson(json)
-          if (tokens) {
-            // Yield synchronous arrays directly (Zero nested async overhead)
-            yield * this._unpackTicks(tokens, topTokens, topProbs, topK)
-          }
+          if (tokens) yield * this.#unpack(tokens, topTokens, topProbs, topK)
         }
       }
     } finally {
@@ -151,7 +139,7 @@ export class MLXGenerate extends MLXStream {
   constructor (model, cache, tokens, options = {}) {
     super(
       mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (err, tok, topTok, topProb, k, done, json) => {
-        this._push({ error: err, tokens: tok, topTokens: topTok, topProbs: topProb, topK: k, done, json })
+        this.push({ error: err, tokens: tok, topTokens: topTok, topProbs: topProb, topK: k, done, json })
       }),
       options.batchSize ?? 1
     )
@@ -256,7 +244,6 @@ export class MLXTarget extends MLXResource {
     const activeBatchSize = options.batchSize || 1
     const isolatedCaches = promptTokensArrays.map(() => this.cache ? this.cache.clone() : null)
 
-    // Force chunkSize to 1 to ensure predictability, but allow any batchSize!
     const tasks = promptTokensArrays.map((tokens, i) =>
       new MLXGenerate(this.model, isolatedCaches[i], tokens, { ...options, chunkSize: 1, batchSize: activeBatchSize })
     )
@@ -266,9 +253,10 @@ export class MLXTarget extends MLXResource {
     let active = tasks.length
     const finalStats = new Array(tasks.length).fill(null)
 
+    const padTokens = new Array(activeBatchSize).fill(-1) // Pre-allocate the padding array ONCE outside the loop. Pushing this exact reference saves thousands of array allocations per second.
+
     try {
       while (active > 0) {
-        // Wait for 1 tick from all active streams concurrently
         const tickResults = await Promise.all(iterators.map(async (it, i) => {
           if (isDone[i]) return { done: true }
           return it.next()
@@ -283,14 +271,14 @@ export class MLXTarget extends MLXResource {
             if (!isDone[i]) {
               isDone[i] = true
               active--
-              finalStats[i] = res.value // Capture final stats
+              finalStats[i] = res.value
             }
-            // Pad the output with an array of -1s to match the requested batchSize
-            tickTokens.push(new Array(activeBatchSize).fill(-1))
+            // OPTIMIZED: Push the shared reference
+            tickTokens.push(padTokens)
           } else {
             allFinishedThisTick = false
-            // res.value is [[t1, t2]], we extract the inner array
-            tickTokens.push(res.value)
+            // OPTIMIZED: Support the new `{ tokens, topLogits }` object structure
+            tickTokens.push(res.value.tokens ?? res.value)
           }
         }
 
@@ -298,11 +286,8 @@ export class MLXTarget extends MLXResource {
         yield tickTokens
       }
 
-      // Return the stats AND the caches so the user can continue the conversation!
       return finalStats.map((stats, i) => ({ stats, cache: isolatedCaches[i] }))
     } finally {
-      // If active > 0, it means the user 'break'd out of the loop or an error was thrown.
-      // We MUST abort tasks and manually free the caches to prevent massive memory leaks.
       if (active > 0) {
         tasks.forEach(task => task.abort())
         isolatedCaches.forEach(c => c?.dispose())
@@ -351,11 +336,18 @@ export class MLXCache extends MLXTarget {
     return new MLXCache(ref, model)
   }
 
-  #model = null
+  #model
 
   constructor (ref, model) {
     super(ref)
     this.#model = model
+
+    const { layers, type, offset, isTrimmable } = this.debug()
+
+    this.layers = layers
+    this.type = type
+    this.offset = offset
+    this.isTrimmable = isTrimmable
   }
 
   get model () {
@@ -386,11 +378,6 @@ export class MLXCache extends MLXTarget {
   slice (start, end) {
     if (!this.available) throw new Error('Cache unavailable')
     return new MLXCache(mlx.sliceCache(this.ref, start, end), this.#model)
-  }
-
-  get isTrimmable () {
-    const { isTrimmable } = this.debug()
-    return isTrimmable // This value should be cached
   }
 
   debug () {
@@ -458,7 +445,7 @@ export class MLXMetrics {
 
 export class MLXBatch extends MLXTask {
   #queue = []
-  #wakeup = () => {}
+  #resolvers = null
   #batchSize = 1
 
   constructor (model, cache, flatTokens, maxLen, batchSize, options = {}) {
@@ -472,28 +459,35 @@ export class MLXBatch extends MLXTask {
 
   #push (event) {
     this.#queue.push(event)
-    this.#wakeup()
+    if (this.#resolvers) {
+      this.#resolvers.resolve()
+      this.#resolvers = null
+    }
+  }
+
+  * #unpack (buffer) {
+    const ticks = buffer.length / this.#batchSize
+    for (let i = 0; i < ticks; i++) {
+      const start = i * this.#batchSize
+      yield Array.from(buffer.subarray(start, start + this.#batchSize)) // zero-copy
+    }
   }
 
   async * [Symbol.asyncIterator] () {
     try {
       while (true) {
         if (this.#queue.length === 0) {
-          const { promise, resolve } = Promise.withResolvers()
-          this.#wakeup = resolve
-          await promise
+          this.#resolvers = Promise.withResolvers()
+          await this.#resolvers.promise
         }
-        for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
+
+        const events = this.#queue
+        this.#queue = []
+
+        for (const { error, tokens, done, json } of events) {
           if (error) throw error
           if (done) return parseJson(json)
-          if (tokens) {
-            yield * (function * (buffer, batchSize) {
-              const ticks = buffer.length / batchSize
-              for (let i = 0; i < ticks; i++) {
-                yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
-              }
-            })(tokens, this.#batchSize)
-          }
+          if (tokens) yield * this.unpack(tokens)
         }
       }
     } finally {
