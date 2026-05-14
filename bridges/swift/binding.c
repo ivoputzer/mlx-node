@@ -354,7 +354,7 @@ static void Swift_OnStreamEvent(void *context, const int32_t *tokens, int32_t co
 
   if (payload_bytes > 0)
   {
-    payload->payload = (char *)ptr + struct_size + tokens_size;
+    payload->payload = cursor;
     memcpy((void *)payload->payload, json_payload, payload_bytes);
   }
   else
