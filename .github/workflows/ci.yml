@@ -13,15 +13,15 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0 # needed to diff the package.json for version changes
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
-          registry-url: "https://registry.npmjs.org"
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
 
       # - name: Select Xcode 16.2 (Swift 6.1+)
       #   run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
