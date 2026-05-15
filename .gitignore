@@ -14,6 +14,8 @@ models/*
 !models/readme.md
 !models/download.sh
 
+demo/
+
 bugs*.md
 todo*.md
 prompt*.md
