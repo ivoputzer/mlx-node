@@ -59,13 +59,13 @@ jobs:
       #   if: steps.cache-tokenizers.outputs.cache-hit != 'true'
       #   run: npm run download
 
-      - name: Install Node Dependencies
+      - name: Install Workspace Dependencies
         run: npm ci
 
-      - name: Build Node Workspaces
+      - name: Build Workspaces
         run: npm run build --workspaces --if-present
 
-      - name: Install Node Dependencies
+      - name: Lint Workspaces
         run: npm run lint
 
       - name: Test Workspaces
