@@ -8,7 +8,7 @@
     "./swift": "./swift.js"
   },
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.11.0"
   },
   "os": [
     "darwin"

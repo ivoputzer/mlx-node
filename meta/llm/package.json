@@ -8,7 +8,7 @@
     "mlx-lm": "*"
   },
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.0.0"
   },
   "os": [
     "darwin"

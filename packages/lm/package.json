@@ -4,7 +4,7 @@
   "description": "Native Large Language Model execution for Node.js on Apple Silicon. Fast, memory-efficient text generation, chat sessions, and tool-calling using MLX and Swift.",
   "type": "module",
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.16.0"
   },
   "os": [
     "darwin"

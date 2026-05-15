@@ -6,5 +6,13 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "mlx-lm": "*",
+    "mlx-node": "*",
+    "mlx-tool": "*"
   }
 }

@@ -4,7 +4,7 @@
   "version": "0.0.0-draft.0",
   "type": "module",
   "exports": {
-    "require": "./mlx.node",
+    "require": "./index.js",
     "import": "./index.js"
   },
   "files": [
@@ -16,7 +16,7 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.0.0"
   },
   "os": [
     "darwin"

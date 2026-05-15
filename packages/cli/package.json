@@ -3,5 +3,8 @@
   "version": "0.0.0-draft.0",
   "private": false,
   "type": "module",
-  "scripts": {}
+  "scripts": {},
+  "engines": {
+    "node": ">=23.5.0"
+  }
 }
