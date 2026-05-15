@@ -10,7 +10,7 @@
   "scripts": {
     "download": "cd models && bash download.sh",
     "test": "npm test --workspaces",
-    "eslint": "eslint"
+    "lint": "eslint"
   },
   "devDependencies": {
     "eslint": "^9.39.4",
