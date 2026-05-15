@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build-test-publish:
     runs-on: macos-14
@@ -31,21 +34,83 @@ jobs:
             bridges/swift/default.metallib
           key: ${{ runner.os }}-metallib-${{ hashFiles('bridges/swift/Package.resolved') }}
 
+      - name: Cache swift & xcodebuild
+        uses: actions/cache@v4
+        with:
+          path: bridges/swift/.build
+          key: ${{ runner.os }}-swift-build-${{ hashFiles('bridges/swift/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swift-build-
+
+      # - name: Cache metadata
+      #   id: cache-tokenizers
+      #   uses: actions/cache@v4
+      #   with:
+      #     # Note: Adjust this path to wherever download.sh creates the folders!
+      #     # Using wildcard assumes download.sh puts model folders in the root or a test dir.
+      #     path: |
+      #       models/*/tokenizer.json
+      #       models/*/tokenizer_config.json
+      #       models/*/chat_template.jinja
+      #     # Hash the readme.md so adding a new model URL triggers a new download
+      #     key: ${{ runner.os }}-tokenizers-${{ hashFiles('models/readme.md', 'models/download.sh') }}
+
+      # - name: Download Tokenizer Assets
+      #   # Only run if the cache didn't have the exact files already
+      #   if: steps.cache-tokenizers.outputs.cache-hit != 'true'
+      #   run: npm run download
+
       - name: Install Node Dependencies
         run: npm ci
 
-      # We just run the build script!
-      # It will automatically detect if the cache hit
-      # If files will exist and skip xcodebuild, or it will run xcodebuild if needed.
-      - name: Build Swift N-API Bridge
-        working-directory: bridges/swift
-        run: ./build.sh
+      - name: Install Node Dependencies
+        run: npm run lint
+
+      - name: Build Node Workspaces
+        run: npm run build --workspaces --if-present
+
+      - name: Test Workspaces
+        run: npm test --workspaces --if-present
 
       # Upload the final Node Addon and Metallib as CI artifacts so you can download them
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: default.metallib
-          path: |
-            bridges/swift/mlx.node
-            bridges/swift/default.metallib
+      # - name: Upload Build Artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: default.metallib
+      #     path: |
+      #       bridges/swift/mlx.node
+      #       bridges/swift/default.metallib
+
+      # - name: Check Version Change
+      #   id: check
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   shell: bash
+      #   run: |
+      #     NEW_VERSION=$(jq -r .version package.json)
+      #     OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
+      #     if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+      #       echo "changed=true" >> $GITHUB_OUTPUT
+      #       echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+      #       echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
+      #     else
+      #       echo "changed=false" >> $GITHUB_OUTPUT
+      #       echo "💤 No version bump detected."
+      #     fi
+
+      # - name: Sync & Publish to NPM
+      #   if: steps.check.outputs.changed == 'true'
+      #   run: |
+      #     node scripts/sync-versions.js
+      #     npm publish --workspaces --access public
+      #   env:
+      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # - name: Tag Git Release
+      #   if: steps.check.outputs.changed == 'true'
+      #   run: |
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git tag v${{ steps.check.outputs.version }}
+      #     git push origin v${{ steps.check.outputs.version }}
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
