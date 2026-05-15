@@ -23,9 +23,6 @@ jobs:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
 
-      - name: Resolve Swift Dependencies
-        run: swift package resolve
-
       - name: Cache default.metallib
         id: cache-metallib
         uses: actions/cache@v4
@@ -37,7 +34,9 @@ jobs:
       - name: Cache swift & xcodebuild
         uses: actions/cache@v4
         with:
-          path: bridges/swift/.build
+          path: |
+            bridges/swift/.build
+            bridges/swift/.swiftpm
           key: ${{ runner.os }}-swift-build-${{ hashFiles('bridges/swift/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-swift-build-
@@ -63,11 +62,11 @@ jobs:
       - name: Install Node Dependencies
         run: npm ci
 
-      - name: Install Node Dependencies
-        run: npm run lint
-
       - name: Build Node Workspaces
         run: npm run build --workspaces --if-present
+
+      - name: Install Node Dependencies
+        run: npm run lint
 
       - name: Test Workspaces
         run: npm test --workspaces --if-present
