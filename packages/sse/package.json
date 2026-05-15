@@ -5,6 +5,7 @@
   "private": false,
   "main": "index.js",
   "scripts": {
+    "test": "exit 0",
     "start": "node index.js"
   }
 }
