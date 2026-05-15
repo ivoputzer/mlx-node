@@ -3,7 +3,9 @@ set -e
 
 LIB_NAME="MLXBridge"
 
-echo "🧹 Cleaning old caches..."
+#########################################################
+# This is only useful for local development
+# echo "🧹 Cleaning old caches..."
 # rm -rf .build
 
 #########################################################
@@ -11,22 +13,30 @@ echo "🧹 Cleaning old caches..."
 # Because when Xcode reads a Package.swift, it compiles the .o (object) files and links them directly into its internal cache.
 # It doesn't bother zipping them up into a standalone .a static archive unless you explicitly create a full Xcode Project file 🚀
 
-# echo "🔨 Building XCodeBuild (forces bundle for default.metallib)..."
-# xcodebuild build -scheme $LIB_NAME -destination 'generic/platform=macOS' -derivedDataPath ./.build/xcode CONFIGURATION=Release
+if [ ! -f "./default.metallib" ]; then
+  echo "🔨 Building XCodeBuild (forces bundle for default.metallib)..."
+  xcodebuild build -scheme $LIB_NAME -destination 'generic/platform=macOS' -derivedDataPath ./.build/xcode CONFIGURATION=Release
 
-# echo "📦 Extracting default.metallib from Xcode Bundle..."
-# METALLIB_PATH=$(find ./.build/xcode -name "default.metallib" | head -n 1)
+  echo "📦 Extracting default.metallib from Xcode Bundle..."
+  METALLIB_PATH=$(find ./.build/xcode -name "default.metallib" | head -n 1)
 
-# if [ -n "$METALLIB_PATH" ]; then
-#   cp "$METALLIB_PATH" ./default.metallib
-#   echo "✅ default.metallib extracted successfully!"
-# else
-#   echo "❌ Error: default.metallib not found!"
-#   exit 1
-# fi
+  if [ -n "$METALLIB_PATH" ]; then
+    cp "$METALLIB_PATH" ./default.metallib
+    echo "✅ default.metallib extracted successfully!"
+  else
+    echo "❌ Error: default.metallib not found!"
+    exit 1
+  fi
+fi
 
 # Up until here should be cached in the CI
 #########################################################
+
+export MLX_METAL_PATH="$(pwd)/default.metallib"
+
+# 2. Safely run your tests now!
+# echo "🧪 Running Swift Tests..."
+# swift test
 
 # So swift build gives you the .a but no metal. xcodebuild gives you the metal but no .a 🙈 🔫
 echo "🔨 Building Swift Core..."
