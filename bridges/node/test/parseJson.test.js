@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import { deepStrictEqual, strictEqual } from 'node:assert/strict'
-import { parseJson } from '../index.js'
+import { parseJson } from 'mlx-node'
 
 describe('.parseJson', () => {
   describe('Valid JSON', () => {

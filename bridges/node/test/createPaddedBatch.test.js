@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test'
 import { strictEqual } from 'node:assert'
-
-import { createPaddedBatch } from '../index.js'
+import { createPaddedBatch } from 'mlx-node'
 
 describe('.createPaddedBatch', () => {
   it('correctly left-pads jagged arrays', (t) => {

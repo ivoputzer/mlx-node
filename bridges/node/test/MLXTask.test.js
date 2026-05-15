@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { strictEqual } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXTask } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXTask } from 'mlx-node'
 
 describe('MLXTask', () => {
   it('aborts using native driver', ({ mock }) => {

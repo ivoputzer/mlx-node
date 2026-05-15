@@ -1,9 +1,8 @@
 import { describe, it } from 'node:test'
 import { ok, strictEqual, throws } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXResource } from '../index.js'
-import { deepStrictEqual } from 'node:assert/strict'
+import mlx from 'mlx-node/swift'
+import { MLXResource } from 'mlx-node'
 
 describe('MLXResource', () => {
   it('throws on instantiation without a native pointer', () => {

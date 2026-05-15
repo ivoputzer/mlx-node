@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { deepStrictEqual, ok, rejects, strictEqual } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXModel, MLXGenerate } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXModel, MLXGenerate } from 'mlx-node'
 
 describe('MLXGenerate', () => {
   it('yields tokens and returns final stats', async ({ mock }) => {

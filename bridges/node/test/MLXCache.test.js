@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { strictEqual, ok, deepStrictEqual } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXCache, MLXModel } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXCache, MLXModel } from 'mlx-node'
 
 describe('MLXCache', ({ mock }) => {
   it('creates cache from an existing model', ({ mock }) => {

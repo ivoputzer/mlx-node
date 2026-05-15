@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { ok, strictEqual } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXMetrics } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXMetrics } from 'mlx-node'
 
 describe('MLXMetrics', () => {
   it('parses system metrics', ({ mock }) => {

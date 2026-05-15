@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { strictEqual, ok, rejects } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXModel } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXModel } from 'mlx-node'
 
 describe('MLXModel', () => {
   it('loads a model from path', async ({ mock }) => {

@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import { ok, rejects, deepStrictEqual } from 'node:assert'
 
-import mlx from 'mlx-swift'
-import { MLXModel, MLXEvaluate } from '../index.js'
+import mlx from 'mlx-node/swift'
+import { MLXModel, MLXEvaluate } from 'mlx-node'
 
 describe('MLXEvaluate', () => {
   it('acts as a Promise and resolves stats on success', async ({ mock }) => {

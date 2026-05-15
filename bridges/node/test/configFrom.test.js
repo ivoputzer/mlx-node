@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test'
 import { strictEqual } from 'node:assert'
-
-import { configFrom } from '../index.js'
+import { configFrom } from 'mlx-node'
 
 describe('.configFrom', () => {
   it('filters only allowed keys', (t) => {
