@@ -4,7 +4,5 @@
   "private": false,
   "type": "module",
   "main": "index.js",
-  "scripts": {
-    "test": "exit 0"
-  }
+  "scripts": {}
 }
