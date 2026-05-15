@@ -244,10 +244,12 @@ static AsyncContext *SetupAsyncPipeline(napi_env env, napi_value js_callback, co
 // V8 Garbage Collection Hook: Triggered when V8 destroys the External ArrayBuffer
 static void GC_FinalizeStreamPayload(napi_env env, void *finalize_data, void *finalize_hint)
 {
-  (void)env;
-  (void)finalize_hint;
-  // Free the single malloc'd block that originated from Swift_OnStreamEvent
+  size_t total_size = (size_t)finalize_hint;
   free(finalize_data);
+
+  // Tell V8 we released the memory!
+  int64_t adjusted_memory;
+  napi_adjust_external_memory(env, -(int64_t)total_size, &adjusted_memory);
 }
 
 static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context, void *data)
@@ -290,8 +292,12 @@ static void V8_OnStreamEvent(napi_env env, napi_value js_callback, void *context
 
         // 2. Zero-Copy: Hand the entire C-pointer directly to V8
         napi_value v8_buffer;
-        napi_create_external_arraybuffer(env, payload, total_size, GC_FinalizeStreamPayload, NULL, &v8_buffer);
+        napi_create_external_arraybuffer(env, payload, total_size, GC_FinalizeStreamPayload, (void*)total_size, &v8_buffer);
         v8_owns_memory = true; // V8 is now responsible for free() via GC!
+
+        // Tell V8 we just took up `total_size` bytes of native memory!
+        int64_t adjusted_memory;
+        napi_adjust_external_memory(env, (int64_t)total_size, &adjusted_memory);
 
         // 3. Create TypedArray Views mapping EXACTLY to our C-memory offsets
         size_t tokens_offset = (char *)payload->tokens - (char *)payload;
