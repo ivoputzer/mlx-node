@@ -19,5 +19,3 @@ demo/
 bugs*.md
 todo*.md
 prompt*.md
-
-package-lock.json
