@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import { strictEqual, deepEqual, rejects, ok } from 'node:assert/strict'
-import { prefill, generate, stream } from '../index.js'
+import { generate, stream, prefill } from '../index.js'
 
 describe('mlx-lm', () => {
   const createMockTarget = (overrides = {}) => ({
@@ -236,18 +236,18 @@ describe('mlx-lm', () => {
           return { promptTokens: 3, generatedTokens: 0 }
         }
       })
-      const result = await evaluate(target, 'test prompt')
+      const result = await prefill(target, 'test prompt')
 
       strictEqual(result.promptTokens, 3)
       strictEqual(result.generatedTokens, 0)
     })
     it.skip('should throw an error if the prompt is empty', async () => {
       const target = createMockTarget()
-      await rejects(evaluate(target, ''), { message: 'Prompt cannot be empty' })
+      await rejects(prefill(target, ''), { message: 'Prompt cannot be empty' })
     })
     it.skip('should throw an error if the target is not ready', async () => {
       const target = createMockTarget({ available: false })
-      await rejects(evaluate(target, 'test'), { message: 'Target not loaded or disposed already' })
+      await rejects(prefill(target, 'test'), { message: 'Target not loaded or disposed already' })
     })
     it.skip('should throw AbortError if signal is already aborted', async () => {
       const target = createMockTarget()
@@ -255,7 +255,7 @@ describe('mlx-lm', () => {
       controller.abort('User cancelled early')
 
       await rejects(
-        evaluate(target, 'test', { signal: controller.signal }),
+        prefill(target, 'test', { signal: controller.signal }),
         (err) => {
           strictEqual(err.name, 'AbortError')
           strictEqual(err.message, 'The operation was aborted')
@@ -278,7 +278,7 @@ describe('mlx-lm', () => {
       })
 
       await rejects(
-        evaluate(target, 'test', { signal: controller.signal }),
+        prefill(target, 'test', { signal: controller.signal }),
         (err) => {
           strictEqual(err.name, 'AbortError')
           strictEqual(err.message, 'Timeout')
@@ -296,7 +296,7 @@ describe('mlx-lm', () => {
         abort: () => { abortCalledAfterReturning = true }
       })
 
-      await evaluate(target, 'test', { signal: controller.signal })
+      await prefill(target, 'test', { signal: controller.signal })
 
       controller.abort() // Triggered after completion
       strictEqual(abortCalledAfterReturning, false)
@@ -308,7 +308,7 @@ describe('mlx-lm', () => {
         }
       })
 
-      await rejects(evaluate(target, 'test'), { name: 'AbortError' })
+      await rejects(prefill(target, 'test'), { name: 'AbortError' })
     })
     it.skip('should pass template options to the encoder', async () => {
       let capturedConfig = null
@@ -320,7 +320,7 @@ describe('mlx-lm', () => {
         generate: async function * () { return {} }
       })
 
-      await evaluate(target, { messages: [] }, { template: { some: 'config' } })
+      await prefill(target, { messages: [] }, { template: { some: 'config' } })
 
       ok(capturedConfig.template)
       strictEqual(capturedConfig.template.some, 'config')
