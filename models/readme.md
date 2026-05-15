@@ -36,7 +36,7 @@ To download the assets required to run the tests, run `bash download.sh`
 - https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct
 - https://huggingface.co/microsoft/Phi-4-mini-instruct
 
-# Jackrong
+## Jackrong
 - https://huggingface.co/Jackrong/MLX-Qwen3.5-9B-DeepSeek-V4-Flash-6bit
 - https://huggingface.co/Jackrong/MLX-Qwen3.5-9B-DeepSeek-V4-Flash-4bit
 - https://huggingface.co/Jackrong/Qwopus3.5-9B-v3
