@@ -4,8 +4,8 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { parseArgs } from 'node:util'
 
-import { MLXModel, MLXCache } from 'mlx-swift'
 import { loadTokenizer, loadTemplate, stopTokensFrom, padTokenFrom } from 'mlx-lm'
+import { MLXModel, MLXCache } from 'mlx-node'
 import { analyzeToolMarkers } from 'mlx-tool'
 
 // ============================================================================
