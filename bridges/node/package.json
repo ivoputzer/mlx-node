@@ -31,7 +31,8 @@
   ],
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "show": "tree -I readme.md -I todo.md; tail -n +1 package.json index.js swift.js"
   },
   "dependencies": {
     "mlx-swift": "*"
