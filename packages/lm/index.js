@@ -1,4 +1,3 @@
-import { Readable } from 'node:stream'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
@@ -41,7 +40,7 @@ function flattenPayload (payload, batchSize) {
   return flat
 }
 
-function formatLogits (logitsObj) {
+export function formatLogits (logitsObj) {
   if (!logitsObj) return []
 
   const { ids, probs } = logitsObj
