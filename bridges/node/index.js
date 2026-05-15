@@ -12,7 +12,7 @@ export class MLXResource {
   get available () { return this.#ref !== null }
 
   dispose () {
-    if (!this.#ref) return false // Prevent double-free logic from running
+    if (!this.#ref) return false // prevent double-free
     mlx.freeResource(this.#ref)
     this.#ref = null
     return true
@@ -49,6 +49,7 @@ export class MLXStream extends MLXTask {
 
   * #unpack (buffer, topTokens, topProbs, topK) {
     const ticks = buffer.length / this.#batchSize
+
     for (let i = 0; i < ticks; i++) {
       const start = i * this.#batchSize
 
@@ -62,14 +63,14 @@ export class MLXStream extends MLXTask {
           // calculate the flat memory offsets for this specific token
           const startK = tokenIdx * topK
           const endK = startK + topK
-          // zero-copy views. No loops! No object creation per logit!
+          // zero-copy views. no loops! no object creation per logit!
           logits[s] = {
             ids: topTokens.subarray(startK, endK),
             probs: topProbs.subarray(startK, endK)
           }
         }
       }
-      yield { tokens, logits } // yield standard object to prevent V8 Dictionary Mode deopt
+      yield { tokens, logits } // yield standard object to prevent v8 dictionary mode deopt we had via .topLogit on array
     }
   }
 
@@ -130,12 +131,6 @@ export class MLXEvaluate extends MLXTask {
 }
 
 export class MLXGenerate extends MLXStream {
-  // #queue = []
-  // #wakeup = () => {} // noop
-
-  // #batchSize = 1
-  // #chunkSize = 5
-
   constructor (model, cache, tokens, options = {}) {
     super(
       mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (err, tok, topTok, topProb, k, done, json) => {
@@ -144,68 +139,6 @@ export class MLXGenerate extends MLXStream {
       options.batchSize ?? 1
     )
   }
-
-  // _constructor (model, cache, tokens, options = { chunkSize: 5, batchSize: 1 }) {
-  //   Function.prototype(
-  //     mlx.generateTask(model?.ref, cache?.ref, tokens, configFrom(options), (error, tokens, topTokens, topProbs, topK, done, json) => {
-  //       let formattedTopLogits = null
-  //       if (topK > 0 && topTokens && topProbs) {
-  //         formattedTopLogits = []
-  //         // Group the flat arrays by batch size and topK
-  //         for (let b = 0; b < tokens.length; b++) {
-  //           const sequenceTops = []
-  //           for (let k = 0; k < topK; k++) {
-  //             const idx = (b * topK) + k
-  //             sequenceTops.push({ id: topTokens[idx], prob: topProbs[idx] })
-  //           }
-  //           formattedTopLogits.push(sequenceTops)
-  //         }
-  //       }
-
-  //       console.log('formattedTopLogits:', done, formattedTopLogits)
-
-  //       this.#push({ error, tokens, topLogits: formattedTopLogits, done, json })
-  //     })
-  //   )
-  //   this.#batchSize = options?.batchSize ?? 1
-  //   this.#chunkSize = options?.chunkSize ?? 5
-  // }
-
-  // #push (event) {
-  //   this.#queue.push(event)
-  //   this.#wakeup() // promise is immutable once settled, should not require to set to null | noop after first call
-  // }
-
-  // async * [Symbol.asyncIterator] () {
-  //   try {
-  //     while (true) {
-  //       if (this.#queue.length === 0) {
-  //         const { promise, resolve } = Promise.withResolvers()
-  //         this.#wakeup = resolve
-  //         await promise // sleep
-  //       }
-  //       for (const { error, tokens, done, json } of this.#queue.splice(0, this.#queue.length)) {
-  //         if (error) throw error
-  //         if (done) return parseSafe(json)
-  //         if (tokens) {
-  //           // Replicate the 'yield *' behavior:
-  //           // Unpack the C flat buffer into discrete ticks (time-steps)
-  //           // Each yield represents ONE tick containing an array of tokens (one per sequence).
-  //           yield * (function * (buffer, batchSize) {
-  //             const ticks = buffer.length / batchSize
-  //             for (let i = 0; i < ticks; i++) {
-  //               // Slice exactly 1 time-step across all sequences
-  //               yield Array.from(buffer.slice(i * batchSize, (i + 1) * batchSize))
-  //             }
-  //           })(tokens, this.#batchSize)
-  //         }
-  //       }
-  //     }
-  //   } finally {
-  //     this.abort()
-  //     this.dispose()
-  //   }
-  // }
 }
 
 export class MLXTarget extends MLXResource {
@@ -278,7 +211,7 @@ export class MLXTarget extends MLXResource {
           } else {
             allFinishedThisTick = false
             // OPTIMIZED: Support the new `{ tokens, topLogits }` object structure
-            tickTokens.push(res.value.tokens ?? res.value)
+            tickTokens.push(res.value.tokens ?? res.value) // fixme: this does not support logits though
           }
         }
 
@@ -303,7 +236,7 @@ export class MLXTarget extends MLXResource {
 
     // Usually pad_token_id is in tokenizer.config.pad_token_id,
     // otherwise fallback to 0 (which is safe for testing)
-    const padTokenId = options.padTokenId ?? 0
+    const padTokenId = options?.padTokenId ?? 0
 
     // Convert jagged arrays into a dense flat tensor
     const { flatTokens, maxLen, batchSize } = createPaddedBatch(promptTokensArrays, padTokenId)
