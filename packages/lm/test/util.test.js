@@ -3,6 +3,7 @@ import { ok, equal } from 'node:assert/strict'
 import { Readable } from 'node:stream'
 import { text } from 'node:stream/consumers'
 import { toWebStream, toStream } from '../lib/util.js' // Adjust path as needed
+import { ReadableStream } from 'node:stream/web'
 
 describe('.util', () => {
   it('.toWebStream correctly converts and filters an async iterable', async () => {

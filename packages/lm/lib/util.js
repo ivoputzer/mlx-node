@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream'
+import { ReadableStream } from 'node:stream/web'
 
 export function toStream (asyncIterable) {
   return Readable.from(asyncIterable)
