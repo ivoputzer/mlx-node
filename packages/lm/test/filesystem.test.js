@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import { strictEqual, deepStrictEqual } from 'node:assert/strict'
 import path from 'node:path'
-import { expand } from '../lib/fs.js'
+import { expandTilde } from '../lib/filesystem.js'
 
 describe('resolve function suite', async (t) => {
   it('handles tilde (~) by calling os.homedir and join', ({ mock }) => {
@@ -9,7 +9,7 @@ describe('resolve function suite', async (t) => {
     const join = mock.fn((...args) => path.join(...args))
     const resolve = mock.fn()
 
-    const result = expand('~/documents/file.txt', { homedir }, { join, resolve })
+    const result = expandTilde('~/documents/file.txt', { homedir }, { join, resolve })
 
     strictEqual(result, '/Users/test/documents/file.txt')
     strictEqual(join.mock.callCount(), 1)
@@ -22,7 +22,7 @@ describe('resolve function suite', async (t) => {
     const resolve = mock.fn((...args) => path.join('/Users/test', ...args))
     const join = mock.fn()
 
-    const result = expand('./src/index.js', { homedir }, { join, resolve })
+    const result = expandTilde('./src/index.js', { homedir }, { join, resolve })
 
     strictEqual(result, '/Users/test/src/index.js')
     strictEqual(resolve.mock.callCount(), 1)
