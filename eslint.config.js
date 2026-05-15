@@ -1,15 +1,10 @@
-import neostandard, { resolveIgnoresFromGitignore } from 'neostandard'
-// import neostandard, { plugins, resolveIgnoresFromGitignore } from 'neostandard'
+import neostandard, { plugins, resolveIgnoresFromGitignore } from 'neostandard'
 
 const ignores = resolveIgnoresFromGitignore()
+const node = plugins.n.configs['flat/recommended']
 
 export default [
   ...neostandard({ ignores }),
+  node,
   { languageOptions: { ecmaVersion: 2025 } }
 ]
-
-// export default [
-//   ...neostandard({ ignores }),
-//   plugins.n.configs['flat/recommended'],
-//   { languageOptions: { ecmaVersion: 2025 } }
-// ]
