@@ -4,6 +4,10 @@
   "private": false,
   "type": "module",
   "scripts": {},
+  "exports": {
+    ".": "./index.js",
+    "./helpers": "./helpers.js"
+  },
   "engines": {
     "node": ">=23.5.0"
   }
