@@ -47,7 +47,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: default.metallib
-          archive: false
+          archive: true
           if-no-files-found: error
           path: bridges/swift/default.metallib
           overwrite: true
@@ -89,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mlx.node
-          archive: false
+          archive: true
           if-no-files-found: error
           path: bridges/swift/mlx.node
           overwrite: true
