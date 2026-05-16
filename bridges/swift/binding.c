@@ -672,7 +672,7 @@ napi_value init(napi_env env, napi_value exports)
   }
 
   napi_value package_version;
-  napi_create_string_utf8(env, NPM_PACKAGE_VERSION, NAPI_AUTO_LENGTH, &package_version);
+  napi_create_string_utf8(env, VERSION, NAPI_AUTO_LENGTH, &package_version);
 
   napi_property_descriptor desc[] = {
       {"version", NULL, NULL, NULL, NULL, package_version, napi_enumerable, NULL},
