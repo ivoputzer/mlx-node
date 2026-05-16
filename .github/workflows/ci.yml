@@ -147,7 +147,6 @@ jobs:
       #   run: npm run download
 
       - run: npm ci
-      - run: npm run build --workspaces --if-present
       - run: npm run lint
       - run: npm test --workspaces --if-present
 
