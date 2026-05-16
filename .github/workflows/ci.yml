@@ -9,40 +9,124 @@ permissions:
   contents: write
 
 jobs:
-  build-test-publish:
-    runs-on: macos-15
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0 # needed to diff the package.json for version changes
+  build:
+    runs-on: macos-latest
 
-      - name: Setup Node.js
+    outputs:
+      metal-key: ${{ steps.metal.outputs.cache-primary-key }}
+      n-api-key: ${{ steps.n-api.outputs.cache-primary-key }}
+
+    steps:
+      - uses: actions/checkout@v6
+      #
+      # FETCH SWIFT PACKAGES (ONLY WHEN NECESSARY: Changes in bridges/swift/Package.resolved)
+      #
+      - uses: actions/cache@v5
+        with:
+          path: bridges/swift/.build
+          key: ${{ runner.os }}-spm-${{ hashFiles('bridges/swift/Package.resolved') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - run: swift package resolve
+        working-directory: bridges/swift
+      #
+      # BUILD METAL (ONLY WHEN NECESSARY: Changes in bridges/swift/.build/checkouts/mlx-swift/**)
+      #
+      - uses: actions/cache/restore@v5
+        id: metal
+        with:
+          path: bridges/swift/default.metallib
+          key: ${{ runner.os }}-metal-${{ hashFiles('bridges/swift/.build/checkouts/mlx-swift/**') }}
+          lookup-only: true
+
+      - if: steps.metal.outputs.cache-hit != 'true'
+        run: npm run build:metal
+        working-directory: bridges/swift
+
+      - if: steps.metal.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: default.metallib
+          archive: false
+          if-no-files-found: error
+          path: bridges/swift/default.metallib
+          overwrite: true
+
+      - uses: actions/cache/save@v5
+        if: steps.metal.outputs.cache-hit != 'true'
+        with:
+          path: bridges/swift/default.metallib
+          key: ${{ steps.metal.outputs.cache-primary-key }}
+      #
+      # BUILD N-API (ONLY WHEN NECESSARY: Changes in bridges/swift/**/*.c, bridges/swift/**/*.h, bridges/swift/**/*.swift, bridges/swift/Package.*)
+      #
+      - uses: actions/cache/restore@v5
+        id: n-api
+        with:
+          path: bridges/swift/mlx.node
+          key: ${{ runner.os }}-n-api-${{ hashFiles('bridges/swift/**/*.c', 'bridges/swift/**/*.h', 'bridges/swift/**/*.swift', 'bridges/swift/Package.*') }}
+          lookup-only: true
+
+      - if: steps.n-api.outputs.cache-hit != 'true'
+        working-directory: bridges/swift
+        run: npm run build:swift -- --disable-automatic-resolution
+
+      - if: steps.n-api.outputs.cache-hit != 'true'
+        working-directory: bridges/swift
+        run: npm run test:swift -- --disable-automatic-resolution
+
+      - if: steps.n-api.outputs.cache-hit != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: lts/*
           registry-url: https://registry.npmjs.org
 
-      # - name: Select Xcode 16.2 (Swift 6.1+)
-      #   run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - if: steps.n-api.outputs.cache-hit != 'true'
+        working-directory: bridges/swift
+        run: npm run build:clang
 
-      - name: Cache default.metallib
-        id: cache-metallib
-        uses: actions/cache@v4
+      - if: steps.n-api.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v7
         with:
-          path: |
-            bridges/swift/default.metallib
-          key: ${{ runner.os }}-metallib-${{ hashFiles('bridges/swift/Package.resolved') }}
+          name: mlx.node
+          archive: false
+          if-no-files-found: error
+          path: bridges/swift/mlx.node
+          overwrite: true
 
-      - name: Cache swift & xcodebuild
-        uses: actions/cache@v4
+      - if: steps.n-api.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          path: |
-            bridges/swift/.build
-            bridges/swift/.swiftpm
-          key: ${{ runner.os }}-swift-build-${{ hashFiles('bridges/swift/Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-swift-build-
+          path: bridges/swift/mlx.node
+          key: ${{ steps.n-api.outputs.cache-primary-key }}
+
+  test-lint-deploy:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # required to diff the package.json for version changes
+      #
+      # RESTORE METAL & N-API FROM CACHE (Hydrates: bridges/swift/default.metallib, bridges/swift/mlx.node)
+      #
+      - uses: actions/cache/restore@v5
+        with:
+          key: ${{ needs.build.outputs.metal-key }}
+          fail-on-cache-miss: true
+          path: bridges/swift/default.metallib
+
+      - uses: actions/cache/restore@v5
+        with:
+          key: ${{ needs.build.outputs.n-api-key }}
+          fail-on-cache-miss: true
+          path: bridges/swift/mlx.node
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+          cache: "npm"
 
       # - name: Cache metadata
       #   id: cache-tokenizers
@@ -62,42 +146,26 @@ jobs:
       #   if: steps.cache-tokenizers.outputs.cache-hit != 'true'
       #   run: npm run download
 
-      - name: Install Workspace Dependencies
-        run: npm ci
+      - run: npm ci
+      - run: npm run build --workspaces --if-present
+      - run: npm run lint
+      - run: npm test --workspaces --if-present
 
-      - name: Build Workspaces
-        run: npm run build --workspaces --if-present
-
-      - name: Lint Workspaces
-        run: npm run lint
-
-      - name: Test Workspaces
-        run: npm test --workspaces --if-present
-
-      # Upload the final Node Addon and Metallib as CI artifacts so you can download them
-      # - name: Upload Build Artifacts
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: default.metallib
-      #     path: |
-      #       bridges/swift/mlx.node
-      #       bridges/swift/default.metallib
-
-      # - name: Check Version Change
-      #   id: check
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   shell: bash
-      #   run: |
-      #     NEW_VERSION=$(jq -r .version package.json)
-      #     OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
-      #     if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
-      #       echo "changed=true" >> $GITHUB_OUTPUT
-      #       echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-      #       echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
-      #     else
-      #       echo "changed=false" >> $GITHUB_OUTPUT
-      #       echo "💤 No version bump detected."
-      #     fi
+      - name: Check Version Change
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: check
+        shell: bash
+        run: |
+          NEW_VERSION=$(jq -r .version package.json)
+          OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
+          if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "💤 No version bump detected."
+          fi
 
       # - name: Sync & Publish to NPM
       #   if: steps.check.outputs.changed == 'true'
