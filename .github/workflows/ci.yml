@@ -27,7 +27,7 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('bridges/swift/Package.resolved') }}
           restore-keys: ${{ runner.os }}-spm-
 
-      - run: swift package resolve
+      - run: swift package resolve --disable-automatic-resolution
         working-directory: bridges/swift
       #
       # BUILD METAL (ONLY WHEN NECESSARY: Changes in bridges/swift/.build/checkouts/mlx-swift/**)
