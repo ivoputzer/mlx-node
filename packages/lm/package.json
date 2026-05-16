@@ -29,6 +29,10 @@
   },
   "author": "Ivo von Putzer Reibegg <ivo.putzer@gmail.com> (https://github.com/ivoputzer)",
   "license": "WTFNMFPL",
+  "exports": {
+    ".": "./index.js",
+    "./plugins": "./plugins.js"
+  },
   "dependencies": {
     "@huggingface/jinja": "^0.5.7",
     "@huggingface/tokenizers": "^0.1.3",
