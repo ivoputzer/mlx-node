@@ -4,13 +4,11 @@
 [![node](https://img.shields.io/badge/node-lts-blue.svg?style=flat-square)](https://nodejs.org/en/about/previous-releases)
 [![license](https://img.shields.io/badge/license-WTFNMFPL-blue.svg?style=flat-square)](https://spdx.org/licenses/WTFNMFPL)
 
-
-
-# MLX Node 🚀
+# MLX Node
 The foundational ecosystem for bringing Apple's **MLX** machine learning framework to **Node.js**. Run Large Language Models, Vision Models, and AI agents directly on Apple Silicon (M1/M2/M3/M4) with zero-overhead native bindings.
 
 > [!NOTE]
-> If you just want to generate text in your Node app, you want to install [**`mlx-lm`**](./packages/lm/readme.md).
+> **If you just want to generate text in your app, you probably want to use [`mlx-lm`](./packages/lm/readme.md)**
 
 ## Architecture
 This monorepo is divided into distinct layers to provide both maximum performance and maximum developer experience:
@@ -21,11 +19,11 @@ This monorepo is divided into distinct layers to provide both maximum performanc
 
 ## Setup
 ```bash
-npm install mlx-lm # This installs mlx-swift, mlx-node, mlx-lm
+npm install mlx-lm # This installs mlx-swift, mlx-node, and mlx-lm
 ```
 
 ## Basic Usage
-Just a sneak peek. Full documentation and the cooler examples live in the [**`mlx-lm`**](./packages/lm/readme.md).
+Just a sneak peek. Full documentation and the more examples live in [**`mlx-lm`**](./packages/lm/readme.md).
 
 ### Standard Generation
 ```js
