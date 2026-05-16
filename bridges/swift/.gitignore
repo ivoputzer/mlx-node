@@ -1,10 +1,7 @@
-/.build
-/Packages
-xcuserdata/
-DerivedData/
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
-.netrc
+.build/
+.xcode/
+.swiftpm/
 
 mlx.node
+mlx.a
 default.metallib
