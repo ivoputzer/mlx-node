@@ -12,27 +12,47 @@ The foundational ecosystem for bringing Apple's **MLX** machine learning framewo
 > [!NOTE]
 > If you just want to generate text in your Node app, you want to install [**`mlx-lm`**](./packages/lm/readme.md).
 
+## Architecture
+This monorepo is divided into distinct layers to provide both maximum performance and maximum developer experience:
+- **Bridges** Low-level, pre-compiled C/C++/Swift Node-API binaries interfacing directly with Apple's Metal GPU APIs.
+- **Packages** High-level, ergonomic JavaScript libraries (like `generate()`, `stream()`, etc).
+- **Meta** Legacy JavaScript libraries and proxy packages for ecosystem compatibility.
+- **Roadmap** Future-facing modules (Vision, Audio, etc.) currently in development.
+
 ## Setup
-```
-npm install mlx-lm
+```bash
+npm install mlx-lm # This installs mlx-swift, mlx-node, mlx-lm
 ```
 
-## Baisc Usage
+## Basic Usage
+Just a sneak peek. Full documentation and the cooler examples live in the [**`mlx-lm`**](./packages/lm/readme.md).
+
+### Standard Generation
 ```js
 import { generate, loadModel } from 'mlx-lm'
 
-using model = loadModel('path/to/your/model')
+// Automatic resource management (Explicit Resource Management)
+using model = await loadModel('path/to/your/model')
 
+// Simple string prompt
 const response = await generate(model, 'Count to 10', { maxTokens: 100 })
-console.log(response.text, respose.stats)
+console.log(response.text, response.stats)
 
-const response = await generate(model, { text: 'Count to 10' }, { template: '<|im_start|>user\n{{ text | trim }}<|im_end|>\n<|im_start|>assistant' }) // Jinja
-console.log(response.text, respose.stats)
+// Model's native chat template
+const response = await generate(model, { messages:[{ role: 'user', content: 'Count to 10' }] }, { temperature: 0.75 })
+console.log(response.text, response.stats)
+
+// Custom Jinja template context (ie. ChatML)
+const response = await generate(model, { text: 'Count to 10' }, { template: '<|im_start|>user\n{{ text | trim }}<|im_end|>\n<|im_start|>assistant' })
+console.log(response.text, response.stats)
 ```
 
+### Streaming Conversations
 ```js
+import { stdout } from 'node:process'
 import { stream, loadModel } from 'mlx-lm'
 
+using model = await loadModel('path/to/your/model')
 const messages = [
   { role: 'system', content: 'You are a helpful math tutor.' },
   { role: 'user', content: 'What is 5 + 5?' },
@@ -44,36 +64,67 @@ for await (const { done, text, stats } of stream(model, { messages })) {
   if (done) {
     console.log(stats)
   } else {
-    process.stdout.write(text)
+    stdout.write(text)
   }
 }
 ```
 
+### Advanced: Plugins (Reasoning & Tool Calls)
 ```js
+import { stdout } from 'node:process'
+import { styleText } from 'node:util'
+
 import { stream, loadModel } from 'mlx-lm'
 import { toolCalls, reasoningContent } from 'mlx-lm/plugins'
+
+using model = await loadModel('path/to/your/model')
 
 const controller = new AbortController()
 const tools = [/* */]
 
-for await (const event of stream(model, { messages, tools }, { signal: controller.signal, maxTokens: 512 }), [reasoningContent, toolCalls]) {
+for await (const event of stream(model, { messages, tools }, { signal: controller.signal }, [reasoningContent, toolCalls])) {
   if (event.done) {
     console.log(event.text, event.reasoningContent, event.toolCalls)
   } else {
-    const {text, isReasoning, hasToolCalls } = event
-    process.stdout.write( 
-      styleText(isReasoning ? 'dim' : 'yellow', text) 
+    const { text, isReasoning, hasToolCalls } = event
+    stdout.write(
+      styleText(isReasoning ? 'dim' : 'yellow', text)
     )
   }
 }
 ```
 
-## Architecture
-This monorepo is divided into distinct layers to provide both maximum performance and maximum developer experience:
-- **Bridges** Low-level, pre-compiled C/C++/Swift Node-API binaries. These interface directly with Apple's Metal GPU APIs.
-- **Packages** High-level, ergonomic JavaScript libraries. These provide the APIs you actually want to use (like `generate()`).
-- **Meta** High-level, legacy JavaScript libraries. These provide access to the same APIs packages do and technically act as a proxy towards other packages.
-- **Roadmap** Packages we havent had time working on yet...
+### Advanced: Batching/ABTesting
+```js
+import { stdin, stdout } from 'node:process'
+import { createInterface } from 'node:readline/promises'
+
+import { stream, loadModel } from 'mlx-lm'
+import { printBatchHeaders, createBatchRenderer } from 'mlx-cli/helpers'
+
+const batchSize = 2
+
+using model = await loadModel('path/to/your/model')
+const readline = createInterface({ input: stdin, output: stdout })
+
+const messages = [
+  { role: 'system', content: 'You are a helpful, very brief AI.' },
+  { role: 'user', content: await readline.question('> ') }
+]
+
+const buffer = Array(batchSize).fill('')
+const render = createBatchRenderer(batchSize, { readline })
+
+printBatchHeaders(batchSize, {titles: Array.from({ length: batchSize }, (_, i) => `Branch ${1 + i}`)})
+
+for await (const batches of stream(model, { messages }, { batchSize, temperature: 0.8 }, [reasoningContent, toolCalls])) {
+  // In batch mode, the stream yields an array of events
+  batches.forEach(({ text }, i) => buffer[i] += text)
+  render(buffer)
+}
+
+render(buffer, true)
+```
 
 ## Contributing
 Contributing to a native Apple Silicon project shouldn't require you to sacrifice disk space to Xcode unless you're actually touching the core. The workflow is meant to be modular. If you are focusing on packages, you can "Go Lite" by pulling our pre-compiled binaries. If you're here to optimize bridges, you can "Go Full" and rebuild the entire stack from source.
@@ -139,50 +190,3 @@ npm test --workspaces --if-present
 
 ## License
 [WTFNMFPL](https://spdx.org/licenses/WTFNMFPL)
-
-
-<!--
-## Project Roadmap
-
-#### Phase 1: Core Reliability (Current)
-- [x] Zero-dependency pre-compiled N-API binaries.
-- [x] Automatic `.metallib` shader discovery & binding.
-- [x] Synchronous Swift-to-V8 threading.
-- [x] ~~Dynamic C-string buffers for massive context windows (>32k).~~ Int32Array
-- [x] Advanced `GenerationConfig` (stop sequences, logit bias).
-- [x] Robust Error Propagation with Swift stack traces.
-- [x] Unified build pipeline for GitHub Actions.
-
-
-#### Phase 2: Usability
-- [x] Implement `[{role: "user", content: "..."}]` Chat Templates (OpenAI compatible?).
-- [ ] Provide Model Metadata (vocab size, context length).
-- [x] Stream Backpressure handling for heavily loaded Node event loops.
-- [ ] GGUF format support in `mlx-lm` (NTH).
-- [ ] Configurable MLX Logging levels.
-- [x] `AbortController` support for killing active inference.
-
-#### Phase 3: Developer Experience & Tooling
-- [ ] TypeScript definitions (`index.d.ts`) or jsdoc.
-- [ ] CLI tools to download models directly from HuggingFace.
-- [ ] Progress callbacks for large model loading.
-
-<!--
-
-### Phase 3.5: Developer Tools
-- [ ] `mlx-server` - Cli to run an OpenAI-Like endpoint
-- [ ] `mlx-agent` - Agent parser (Agent = Model+Prompt+Tools+Loop -> Wrapper for an agent function definition)
-  - Pipeline
-  - Tool
-  - Queue
-  - Agent
-- [ ] `mlx-tool` - Tool parser (Tool = Wrapper/Parser for a function with definitions) <- To be honest this doesnt even make much sense and should be in
-- [ ] `mlx-mcp` - Tools that allows you to spin up mcp servers that can be passed to an Agent (directory access, git access, docker, etc)
-
-
-### Phase 4: Ecosystem Expansion
-- [ ] `mlx-embed` - Text Embeddings API.
-- [ ] `mlx-audio` - Whisper integration for Speech-to-Text.
-- [ ] `mlx-image` - Diffusion model integration.
-
--->
