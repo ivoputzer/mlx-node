@@ -4,6 +4,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,33 +19,34 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-      #
+
       # FETCH SWIFT PACKAGES (ONLY WHEN NECESSARY: Changes in bridges/swift/Package.resolved)
       #
       - uses: actions/cache@v5
+        id: spm
         with:
           path: bridges/swift/.build
           key: ${{ runner.os }}-spm-${{ hashFiles('bridges/swift/Package.resolved') }}
           restore-keys: ${{ runner.os }}-spm-
 
-      - run: swift package resolve --disable-automatic-resolution
+      - if: steps.spm.outputs.cache-hit != 'true'
+        run: swift package resolve --disable-automatic-resolution
         working-directory: bridges/swift
-      #
+
       # BUILD METAL (ONLY WHEN NECESSARY: Changes in bridges/swift/.build/checkouts/mlx-swift/**)
       #
       - uses: actions/cache/restore@v5
         id: metal
         with:
           path: bridges/swift/default.metallib
-          key: ${{ runner.os }}-metal-${{ hashFiles('bridges/swift/.build/checkouts/mlx-swift/**') }}
+          key: ${{ runner.os }}-metal-${{ hashFiles('bridges/swift/Package.resolved') }}
           lookup-only: true
 
       - if: steps.metal.outputs.cache-hit != 'true'
         run: npm run build:metal
         working-directory: bridges/swift
 
-      - if: steps.metal.outputs.cache-hit != 'true'
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: default.metallib
           archive: true
@@ -57,7 +59,7 @@ jobs:
         with:
           path: bridges/swift/default.metallib
           key: ${{ steps.metal.outputs.cache-primary-key }}
-      #
+
       # BUILD N-API (ONLY WHEN NECESSARY: Changes in bridges/swift/**/*.c, bridges/swift/**/*.h, bridges/swift/**/*.swift, bridges/swift/Package.*)
       #
       - uses: actions/cache/restore@v5
@@ -85,8 +87,7 @@ jobs:
         working-directory: bridges/swift
         run: npm run build:clang
 
-      - if: steps.n-api.outputs.cache-hit != 'true'
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: mlx.node
           archive: true
@@ -107,7 +108,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # required to diff the package.json for version changes
-      #
+
       # RESTORE METAL & N-API FROM CACHE (Hydrates: bridges/swift/default.metallib, bridges/swift/mlx.node)
       #
       - uses: actions/cache/restore@v5
@@ -122,64 +123,44 @@ jobs:
           fail-on-cache-miss: true
           path: bridges/swift/mlx.node
 
+      # REGULAR NPM WORKSPACE PIPLINE FROM NOW ON...
+      #
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
           registry-url: https://registry.npmjs.org
           cache: "npm"
 
-      # - name: Cache metadata
-      #   id: cache-tokenizers
-      #   uses: actions/cache@v4
-      #   with:
-      #     # Note: Adjust this path to wherever download.sh creates the folders!
-      #     # Using wildcard assumes download.sh puts model folders in the root or a test dir.
-      #     path: |
-      #       models/*/tokenizer.json
-      #       models/*/tokenizer_config.json
-      #       models/*/chat_template.jinja
-      #     # Hash the readme.md so adding a new model URL triggers a new download
-      #     key: ${{ runner.os }}-tokenizers-${{ hashFiles('models/readme.md', 'models/download.sh') }}
-
-      # - name: Download Tokenizer Assets
-      #   # Only run if the cache didn't have the exact files already
-      #   if: steps.cache-tokenizers.outputs.cache-hit != 'true'
-      #   run: npm run download
-
       - run: npm ci
       - run: npm run lint
       - run: npm test --workspaces --if-present
 
-      - name: Check Version Change
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: check
-        shell: bash
-        run: |
-          NEW_VERSION=$(jq -r .version package.json)
-          OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
-          if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-            echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "💤 No version bump detected."
-          fi
-
-      # - name: Sync & Publish to NPM
-      #   if: steps.check.outputs.changed == 'true'
+      # - name: requires release
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   id: version
+      #   shell: bash
       #   run: |
-      #     node scripts/sync-versions.js
-      #     npm publish --workspaces --access public
+      #     NEW_VERSION=$(jq -r .version package.json)
+      #     OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
+      #     if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+      #       echo "changed=true" >> $GITHUB_OUTPUT
+      #       echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+      #       echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
+      #     else
+      #       echo "changed=false" >> $GITHUB_OUTPUT
+      #       echo "💤 No version bump detected."
+      #     fi
+
+      # - name: npm publish
+      #   if: steps.version.outputs.changed == 'true'
+      #   run: |
+      #     # node scripts/sync-versions.js
+      #     # npm publish --workspaces --access public
       #   env:
       #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # - name: Tag Git Release
-      #   if: steps.check.outputs.changed == 'true'
-      #   run: |
-      #     git config user.name "github-actions[bot]"
-      #     git config user.email "github-actions[bot]@users.noreply.github.com"
-      #     git tag v${{ steps.check.outputs.version }}
-      #     git push origin v${{ steps.check.outputs.version }}
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# [ TODO ]
+# - [ ] Adding test coverage via --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=
+# - [ ] Push results to coveralls or similar services to get a badge for each project
+# - [ ] Add back version bump checker on workspace package.json and script that does lockstep versioning on all packages using npm version 🤔 how would that work in a monorepo though
+# - [ ] Add npm publish of all packages at once
