@@ -12,12 +12,19 @@
     "mlx.node",
     "default.metallib"
   ],
+  "config": {
+    "metal_flags": "-DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DMLX_BUILD_GGUF=OFF -DMLX_BUILD_SAFETENSORS=OFF"
+  },
   "scripts": {
-    "build:swift": "b() { set -e; swift build --configuration release \"$@\"; find .build -name \"lib$(swift package dump-package | jq -r .name).a\" -exec cp {} ./mlx.a \\;; }; b",
-    "build:clang": "clang -O3 -shared -DVERSION=\"\\\"$npm_package_version\\\"\" -I\"${npm_node_execpath%/*/*}/include/node\" binding.c mlx.a -o mlx.node -undefined dynamic_lookup -L/usr/lib/swift -mmacosx-version-min=14.0",
-    "build:metal": "set -e; cd .build/checkouts/mlx-swift; xcodebuild build -scheme MLX -destination 'generic/platform=macOS,variant=macos' -derivedDataPath ../../../.xcode -quiet CONFIGURATION=Release; find ../../../.xcode -name default.metallib -exec cp {} ../../../default.metallib \\;",
-    "build": "npm run build:swift && npm run build:metal && npm run build:clang",
-    "test:swift": "t() { swift test --configuration release \"$@\"; }; t",
+    "node:include": "node -pe \"path.join(process.execPath, '..', '..', 'include', 'node')\"",
+    "node:napi-version": "grep -rih \"#define napi_version \\d\" \"$(npm run -s node:include)\" | awk '{print \"{\\\"\" tolower($2) \"\\\": \" $3 \"}\"}'",
+    "build:swift": "swift build --configuration release",
+    "build:swift:product": "find $(swift build --configuration release --show-bin-path) -name \"lib$(swift package dump-package | jq -r '.products[0].name').a\"",
+    "build:metal": "set -e; cmake -S .build/checkouts/mlx-swift/Source/Cmlx/mlx -B .build/metal $npm_package_config_metal_flags; cmake --build .build/metal --target mlx-metallib --parallel",
+    "build:metal:product": "find .build/metal -name \"*.metallib\"",
+    "build:napi": "clang -O3 -shared -DVERSION=\"\\\"$npm_package_version\\\"\" -I\"$(npm run -s node:include)\" binding.c \"$(npm run -s build:swift:product)\" -o mlx.node -undefined dynamic_lookup -L/usr/lib/swift -mmacosx-version-min=14.0",
+    "build": "npm run build:swift && npm run build:metal && npm run build:napi && cp $(npm run -s build:metal:product) default.metallib",
+    "test:swift": "swift test --configuration debug",
     "test": "node --test"
   },
   "engines": {

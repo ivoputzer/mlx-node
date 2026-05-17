@@ -1,7 +1,5 @@
 .build/
-.xcode/
 .swiftpm/
 
 mlx.node
-mlx.a
 default.metallib
