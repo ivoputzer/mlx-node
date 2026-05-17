@@ -46,14 +46,6 @@ jobs:
         run: npm run build:metal
         working-directory: bridges/swift
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: default.metallib
-          archive: true
-          if-no-files-found: error
-          path: bridges/swift/default.metallib
-          overwrite: true
-
       - uses: actions/cache/save@v5
         if: steps.metal.outputs.cache-hit != 'true'
         with:
@@ -87,14 +79,6 @@ jobs:
         working-directory: bridges/swift
         run: npm run build:clang
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: mlx.node
-          archive: true
-          if-no-files-found: error
-          path: bridges/swift/mlx.node
-          overwrite: true
-
       - if: steps.n-api.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
@@ -122,6 +106,22 @@ jobs:
           key: ${{ needs.build.outputs.n-api-key }}
           fail-on-cache-miss: true
           path: bridges/swift/mlx.node
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: default.metallib
+          archive: true
+          if-no-files-found: error
+          path: bridges/swift/default.metallib
+          overwrite: true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mlx.node
+          archive: true
+          if-no-files-found: error
+          path: bridges/swift/mlx.node
+          overwrite: true
 
       # REGULAR NPM WORKSPACE PIPLINE FROM NOW ON...
       #
@@ -160,6 +160,7 @@ jobs:
       #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
 # [ TODO ]
+#
 # - [ ] Adding test coverage via --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=
 # - [ ] Push results to coveralls or similar services to get a badge for each project
 # - [ ] Add back version bump checker on workspace package.json and script that does lockstep versioning on all packages using npm version 🤔 how would that work in a monorepo though
