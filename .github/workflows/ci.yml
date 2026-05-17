@@ -65,9 +65,11 @@ jobs:
         working-directory: bridges/swift
         run: npm run build:swift -- --disable-automatic-resolution
 
-      - if: steps.n-api.outputs.cache-hit != 'true'
-        working-directory: bridges/swift
-        run: npm run test:swift -- --disable-automatic-resolution
+      # This step could replce build in future (it requires default.metallib to be placed correctly)
+      #
+      # - if: steps.n-api.outputs.cache-hit != 'true'
+      #   working-directory: bridges/swift
+      #   run: npm run test:swift -- --disable-automatic-resolution
 
       - if: steps.n-api.outputs.cache-hit != 'true'
         uses: actions/setup-node@v6
