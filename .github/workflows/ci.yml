@@ -107,22 +107,6 @@ jobs:
           fail-on-cache-miss: true
           path: bridges/swift/mlx.node
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: default.metallib
-          archive: true
-          if-no-files-found: error
-          path: bridges/swift/default.metallib
-          overwrite: true
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: mlx.node
-          archive: true
-          if-no-files-found: error
-          path: bridges/swift/mlx.node
-          overwrite: true
-
       # REGULAR NPM WORKSPACE PIPLINE FROM NOW ON...
       #
       - uses: actions/setup-node@v6
@@ -135,33 +119,13 @@ jobs:
       - run: npm run lint
       - run: npm test --workspaces --if-present
 
-      # - name: requires release
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   id: version
-      #   shell: bash
-      #   run: |
-      #     NEW_VERSION=$(jq -r .version package.json)
-      #     OLD_VERSION=$(git show ${{ github.event.before }}:package.json | jq -r .version || echo "0.0.0")
-      #     if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
-      #       echo "changed=true" >> $GITHUB_OUTPUT
-      #       echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-      #       echo "🚀 Version bumped from $OLD_VERSION to $NEW_VERSION"
-      #     else
-      #       echo "changed=false" >> $GITHUB_OUTPUT
-      #       echo "💤 No version bump detected."
-      #     fi
-
-      # - name: npm publish
-      #   if: steps.version.outputs.changed == 'true'
-      #   run: |
-      #     # node scripts/sync-versions.js
-      #     # npm publish --workspaces --access public
-      #   env:
-      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-# [ TODO ]
-#
-# - [ ] Adding test coverage via --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=
-# - [ ] Push results to coveralls or similar services to get a badge for each project
-# - [ ] Add back version bump checker on workspace package.json and script that does lockstep versioning on all packages using npm version 🤔 how would that work in a monorepo though
-# - [ ] Add npm publish of all packages at once
+      - name: gh release upload edge bridges/swift/default.metallib bridges/swift/mlx.node
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag -f edge
+          git push -f origin edge
+          if ! gh release view edge >/dev/null 2>&1; then
+            gh release create edge --prerelease --title "🚧 Continuous Build (Edge)" --notes "Bleeding-edge pre-compiled macOS binaries for Apple Silicon. Auto-updated on every push to main."
+          fi
+          gh release upload edge bridges/swift/default.metallib bridges/swift/mlx.node --clobber

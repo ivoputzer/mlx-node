@@ -131,8 +131,8 @@ Contributing to a native Apple Silicon project shouldn't require you to sacrific
 ```bash
 gh repo clone ivoputzer/mlx-node
 
-gh run download --name mlx.node --dir bridges/swift
-gh run download --name default.metallib --dir bridges/swift
+gh release download edge --pattern "mlx.node" --dir bridges/swift
+gh release download edge --pattern "default.metallib" --dir bridges/swift
 
 npm install
 npm test --workspaces --if-present
@@ -143,22 +143,8 @@ Unlike `git clone`, the Artifacts API requires a valid `GITHUB_TOKEN` exported i
 ```bash
 git clone https://github.com/ivoputzer/mlx-node.git
 
-fetch_prebuilt () {
-  URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/repos/ivoputzer/mlx-node/actions/artifacts?name=$1&per_page=1" \
-    | jq -r '.artifacts[0].archive_download_url')
-
-  if [ "$URL" != "null" ]; then
-    echo "Downloading $1..."
-    curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o "$1.zip" "$URL"
-    unzip -o "$1.zip" -d bridges/swift/ && rm "$1.zip"
-  else
-    echo "Artifact $1 not found. Check your GITHUB_TOKEN."
-  fi
-}
-
-fetch_prebuilt  "mlx.node"
-fetch_prebuilt  "default.metallib"
+curl -L -o bridges/swift/mlx.node "https://github.com/ivoputzer/mlx-node/releases/download/edge/mlx.node"
+curl -L -o bridges/swift/default.metallib "https://github.com/ivoputzer/mlx-node/releases/download/edge/default.metallib"
 
 npm install
 npm test --workspaces --if-present
